@@ -9,13 +9,13 @@
 ## Быстрый запуск
 
 ```sh
-opkg update && opkg install curl && sh -c "$(curl -fsSL https://raw.githubusercontent.com/alexeeeeeeey/openwrt_proxy/main/install.sh)" -- 'vless://...'
+opkg update && opkg install curl && sh -c "$(curl -fsSL https://raw.githubusercontent.com/alexeeeeeeey/OpenWrt-Xray-TProxy-Setup/main/install.sh)" -- 'vless://...'
 ```
 
 С исключением из проксирования MAC адреса:
 
 ```sh
-opkg update && opkg install curl && sh -c "$(curl -fsSL https://raw.githubusercontent.com/alexeeeeeeey/openwrt_proxy/main/install.sh)" -- 'vless://...' '18:c0:4d:da:29:8b'
+opkg update && opkg install curl && sh -c "$(curl -fsSL https://raw.githubusercontent.com/alexeeeeeeey/OpenWrt-Xray-TProxy-Setup/main/install.sh)" -- 'vless://...' '18:c0:4d:da:29:8b'
 ```
 
 Xray запускается с 2 inbound: dokodemo-door (port 10808) и socks (port 10818), второй для проверки
