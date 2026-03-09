@@ -218,14 +218,23 @@ cat > /etc/xray/config.json <<EOF
         "type": "field"
       },
       {
-        "ip": ["geoip:PRIVATE", "geoip:RU"],
         "domain": [
           "geosite:PRIVATE",
           "geosite:APPLE",
           "geosite:CATEGORY-GOV-RU",
           "geosite:YANDEX",
           "geosite:MAILRU",
-          "regexp:.ru$"
+          "domain:restream-media.net",
+          ".ru",
+          ".xn--p1ai"
+        ],
+        "outboundTag": "direct",
+        "type": "field"
+      },
+      {
+        "ip": [
+          "geoip:PRIVATE",
+          "geoip:RU"
         ],
         "outboundTag": "direct",
         "type": "field"
