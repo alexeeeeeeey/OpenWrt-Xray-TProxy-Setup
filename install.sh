@@ -219,11 +219,6 @@ cat > /etc/xray/config.json <<EOF
       },
       {
         "domain": [
-          "geosite:PRIVATE",
-          "geosite:APPLE",
-          "geosite:CATEGORY-GOV-RU",
-          "geosite:YANDEX",
-          "geosite:MAILRU",
           "domain:restream-media.net",
           ".ru",
           ".xn--p1ai"
@@ -231,10 +226,8 @@ cat > /etc/xray/config.json <<EOF
         "outboundTag": "direct",
         "type": "field"
       },
-      {
         "ip": [
-          "geoip:PRIVATE",
-          "geoip:RU"
+          "geoip:PRIVATE"
         ],
         "outboundTag": "direct",
         "type": "field"
@@ -252,12 +245,6 @@ table inet xray {
   }
 
   chain xray-chain {
-    ip daddr 192.168.0.0/16 return
-    ip daddr 10.0.0.0/8 return
-    ip daddr 127.0.0.0/8 return
-    ip daddr 172.16.0.0/12 return
-    ip daddr 224.0.0.0/4 return
-    ip daddr 240.0.0.0/4 return
     ${BYPASS_RULE}
     meta l4proto tcp tproxy to :10808 meta mark set 1
     meta l4proto udp tproxy to :10808 meta mark set 1
