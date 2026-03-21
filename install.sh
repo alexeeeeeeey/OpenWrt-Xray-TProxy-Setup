@@ -225,12 +225,6 @@ cat > /etc/xray/config.json <<EOF
         ],
         "outboundTag": "direct",
         "type": "field"
-      },
-        "ip": [
-          "geoip:PRIVATE"
-        ],
-        "outboundTag": "direct",
-        "type": "field"
       }
     ]
   }
@@ -245,6 +239,13 @@ table inet xray {
   }
 
   chain xray-chain {
+    ip daddr 10.0.0.0/8 return
+    ip daddr 100.64.0.0/10 return
+    ip daddr 172.16.0.0/12 return
+    ip daddr 192.168.0.0/16 return
+    ip daddr 169.254.0.0/16 return
+    ip daddr 224.0.0.0/4 return
+    ip daddr 255.255.255.255 return
     ${BYPASS_RULE}
     meta l4proto tcp tproxy to :10808 meta mark set 1
     meta l4proto udp tproxy to :10808 meta mark set 1
