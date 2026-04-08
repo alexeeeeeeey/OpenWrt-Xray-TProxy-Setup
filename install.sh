@@ -95,18 +95,6 @@ stop() {
   ip route del local default dev lo table 100 2>/dev/null
 }
 EOF
-
-  cat > /root/on.sh <<'EOF'
-/etc/init.d/xray start
-/etc/init.d/xray-tproxy start
-EOF
-
-  cat > /root/off.sh <<'EOF'
-/etc/init.d/xray stop
-/etc/init.d/xray-tproxy stop
-EOF
-
-  chmod +x /etc/init.d/xray /etc/init.d/xray-tproxy /root/on.sh /root/off.sh
 }
 
 write_manager() {
