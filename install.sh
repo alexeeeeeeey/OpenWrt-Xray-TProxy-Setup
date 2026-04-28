@@ -244,7 +244,7 @@ del_mac() {
   fi
 
   BYPASS_MACS="$(printf '%s\n' "$BYPASS_MACS" | tr ',' '\n' | grep -vx "$m" || true)"
-  BYPASS_MACS="$(printf '%s\n' "$BYPASS_MACS" | paste -sd, -)"
+  BYPASS_MACS="$(printf '%s\n' "$BYPASS_MACS" | join_comma_lines)"
 
   save_state
   echo "MAC removed"
@@ -257,6 +257,21 @@ list_mac() {
     return 0
   fi
   printf '%s\n' "$BYPASS_MACS" | tr ',' '\n'
+}
+
+join_comma_lines() {
+  first=1
+  out=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if [ "$first" -eq 1 ]; then
+      out="$line"
+      first=0
+    else
+      out="${out},${line}"
+    fi
+  done
+  printf '%s' "$out"
 }
 
 parse_vless() {
@@ -433,7 +448,8 @@ write_xray_config() {
         "domain": [
           "domain:restream-media.net",
           ".ru",
-          ".xn--p1ai"
+          ".xn--p1ai",
+          "vk.com"
         ],
         "outboundTag": "direct",
         "type": "field"
