@@ -43,6 +43,34 @@ xray-manager apply
 
 ---
 
+## Routing bypass rules
+
+These rules are now stored in `/etc/xray-manager/config` as `BYPASS_RULES` and are written into Xray `routing.rules` during `apply` / `refresh`.
+
+Default rules:
+
+```sh
+domain:restream-media.net
+.ru
+.xn--p1ai
+```
+
+Examples:
+
+```sh
+xray-manager add-bypass-rule 'vk.com'
+xray-manager add-bypass-rule '.youtube.com'
+xray-manager add-bypass-rule 'domain:restream-media.net'
+xray-manager list-bypass-rules
+xray-manager del-bypass-rule 'vk.com'
+```
+
+Note:
+
+- MAC bypass is still handled in `nftables`, because Xray `routing` itself does not match clients by MAC address.
+
+---
+
 ### Подписка
 
 ```sh

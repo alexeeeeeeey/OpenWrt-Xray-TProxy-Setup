@@ -11,6 +11,7 @@ STATE_FILE="${BASE_DIR}/config"
 XRAY_DIR="/etc/xray"
 XRAY_CONFIG="${XRAY_DIR}/config.json"
 NFT_RULES="${XRAY_DIR}/nft.rules"
+DEFAULT_BYPASS_RULES="domain:restream-media.net,.ru,.xn--p1ai"
 
 fail() {
   echo "Error: $*" >&2
@@ -31,11 +32,12 @@ ensure_dirs() {
 
 write_state_defaults() {
   [ -f "$STATE_FILE" ] && return 0
-  cat > "$STATE_FILE" <<'EOF'
+  cat > "$STATE_FILE" <<EOF
 MODE="url"
 CURRENT_URL=""
 SUBSCRIPTION_URL=""
 BYPASS_MACS=""
+BYPASS_RULES="${DEFAULT_BYPASS_RULES}"
 LAST_SOURCE=""
 EOF
 }
@@ -107,6 +109,7 @@ STATE_FILE="${BASE_DIR}/config"
 XRAY_DIR="/etc/xray"
 XRAY_CONFIG="${XRAY_DIR}/config.json"
 NFT_RULES="${XRAY_DIR}/nft.rules"
+DEFAULT_BYPASS_RULES="domain:restream-media.net,.ru,.xn--p1ai"
 
 fail() {
   echo "Error: $*" >&2
@@ -134,6 +137,7 @@ load_state() {
   [ -f "$STATE_FILE" ] || fail "state file not found: $STATE_FILE"
   # shellcheck disable=SC1090
   . "$STATE_FILE"
+  [ "${BYPASS_RULES+x}" = "x" ] || BYPASS_RULES="$DEFAULT_BYPASS_RULES"
 }
 
 save_state() {
@@ -142,6 +146,7 @@ MODE="$(printf '%s' "${MODE:-url}" | sed 's/"/\\"/g')"
 CURRENT_URL="$(printf '%s' "${CURRENT_URL:-}" | sed 's/"/\\"/g')"
 SUBSCRIPTION_URL="$(printf '%s' "${SUBSCRIPTION_URL:-}" | sed 's/"/\\"/g')"
 BYPASS_MACS="$(printf '%s' "${BYPASS_MACS:-}" | sed 's/"/\\"/g')"
+BYPASS_RULES="$(printf '%s' "${BYPASS_RULES:-}" | sed 's/"/\\"/g')"
 LAST_SOURCE="$(printf '%s' "${LAST_SOURCE:-}" | sed 's/"/\\"/g')"
 EOS
 }
@@ -198,15 +203,35 @@ normalize_mac() {
   printf '%s' "$1" | tr 'A-Z' 'a-z'
 }
 
+normalize_bypass_rule() {
+  printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
 validate_mac() {
   mac="$(normalize_mac "$1")"
   printf '%s' "$mac" | grep -Eq '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$' || fail "invalid MAC address: $1"
+}
+
+validate_bypass_rule() {
+  rule="$(normalize_bypass_rule "$1")"
+  [ -n "$rule" ] || fail "empty bypass rule"
+  case "$rule" in
+    *\"*|*\\*|*,*)
+      fail "bypass rule must not contain quotes, backslashes or commas"
+      ;;
+  esac
 }
 
 mac_exists() {
   m="$(normalize_mac "$1")"
   [ -n "${BYPASS_MACS:-}" ] || return 1
   printf '%s\n' "$BYPASS_MACS" | tr ',' '\n' | grep -qx "$m"
+}
+
+rule_exists() {
+  r="$(normalize_bypass_rule "$1")"
+  [ -n "${BYPASS_RULES:-}" ] || return 1
+  printf '%s\n' "$BYPASS_RULES" | tr ',' '\n' | grep -Fxq "$r"
 }
 
 add_mac() {
@@ -272,6 +297,56 @@ join_comma_lines() {
     fi
   done
   printf '%s' "$out"
+}
+
+add_rule() {
+  load_state
+  r="${1:-}"
+  [ -n "$r" ] || fail "usage: xray-manager add-bypass-rule <rule>"
+  validate_bypass_rule "$r"
+  r="$(normalize_bypass_rule "$r")"
+
+  if rule_exists "$r"; then
+    echo "Bypass rule already exists"
+    return 0
+  fi
+
+  if [ -n "${BYPASS_RULES:-}" ]; then
+    BYPASS_RULES="${BYPASS_RULES},${r}"
+  else
+    BYPASS_RULES="$r"
+  fi
+
+  save_state
+  echo "Bypass rule added"
+}
+
+del_rule() {
+  load_state
+  r="${1:-}"
+  [ -n "$r" ] || fail "usage: xray-manager del-bypass-rule <rule>"
+  validate_bypass_rule "$r"
+  r="$(normalize_bypass_rule "$r")"
+
+  if [ -z "${BYPASS_RULES:-}" ]; then
+    echo "No bypass rules configured"
+    return 0
+  fi
+
+  BYPASS_RULES="$(printf '%s\n' "$BYPASS_RULES" | tr ',' '\n' | grep -Fvx "$r" || true)"
+  BYPASS_RULES="$(printf '%s\n' "$BYPASS_RULES" | join_comma_lines)"
+
+  save_state
+  echo "Bypass rule removed"
+}
+
+list_rules() {
+  load_state
+  if [ -z "${BYPASS_RULES:-}" ]; then
+    echo "No bypass rules configured"
+    return 0
+  fi
+  printf '%s\n' "$BYPASS_RULES" | tr ',' '\n'
 }
 
 parse_vless() {
@@ -343,23 +418,55 @@ parse_vless() {
   SID_JSON="$(json_string_or_null "$SID")"
 }
 
-build_bypass_rules() {
-  BYPASS_RULES=""
+build_nft_bypass_rules() {
+  NFT_BYPASS_RULES=""
   if [ -n "${BYPASS_MACS:-}" ]; then
     OLD_IFS="${IFS:- }"
     IFS=','
     for m in $BYPASS_MACS; do
       [ -n "$m" ] || continue
-      BYPASS_RULES="${BYPASS_RULES}    ether saddr $(json_escape "$m") return
+      NFT_BYPASS_RULES="${NFT_BYPASS_RULES}    ether saddr $(json_escape "$m") return
 "
     done
     IFS="$OLD_IFS"
   fi
 }
 
+build_routing_direct_rule_json() {
+  ROUTING_RULES_JSON=""
+  ROUTING_DIRECT_RULE_JSON=""
+  if [ -n "${BYPASS_RULES:-}" ]; then
+    OLD_IFS="${IFS:- }"
+    IFS=','
+    for rule in $BYPASS_RULES; do
+      rule="$(normalize_bypass_rule "$rule")"
+      [ -n "$rule" ] || continue
+      escaped_rule="$(json_escape "$rule")"
+      if [ -n "$ROUTING_RULES_JSON" ]; then
+        ROUTING_RULES_JSON="${ROUTING_RULES_JSON},
+          \"${escaped_rule}\""
+      else
+        ROUTING_RULES_JSON="          \"${escaped_rule}\""
+      fi
+    done
+    IFS="$OLD_IFS"
+
+    if [ -n "$ROUTING_RULES_JSON" ]; then
+      ROUTING_DIRECT_RULE_JSON="      {
+        \"domain\": [
+${ROUTING_RULES_JSON}
+        ],
+        \"outboundTag\": \"direct\",
+        \"type\": \"field\"
+      }"
+    fi
+  fi
+}
+
 write_xray_config() {
   parse_vless "$1"
-  build_bypass_rules
+  build_nft_bypass_rules
+  build_routing_direct_rule_json
 
   cat > "$XRAY_CONFIG" <<EOS
 {
@@ -444,16 +551,7 @@ write_xray_config() {
   "routing": {
     "domainStrategy": "IpIfNonMatch",
     "rules": [
-      {
-        "domain": [
-          "domain:restream-media.net",
-          ".ru",
-          ".xn--p1ai",
-          "vk.com"
-        ],
-        "outboundTag": "direct",
-        "type": "field"
-      }
+${ROUTING_DIRECT_RULE_JSON}
     ]
   }
 }
@@ -474,7 +572,7 @@ table inet xray {
     ip daddr 169.254.0.0/16 return
     ip daddr 224.0.0.0/4 return
     ip daddr 255.255.255.255 return
-${BYPASS_RULES}    meta l4proto tcp tproxy to :10808 meta mark set 1
+${NFT_BYPASS_RULES}    meta l4proto tcp tproxy to :10808 meta mark set 1
     meta l4proto udp tproxy to :10808 meta mark set 1
   }
 }
@@ -563,6 +661,7 @@ cmd_show() {
   echo "CURRENT_URL=${CURRENT_URL:-}"
   echo "SUBSCRIPTION_URL=${SUBSCRIPTION_URL:-}"
   echo "BYPASS_MACS=${BYPASS_MACS:-}"
+  echo "BYPASS_RULES=${BYPASS_RULES:-}"
   echo "LAST_SOURCE=${LAST_SOURCE:-}"
 }
 
@@ -595,12 +694,15 @@ cmd_menu() {
     echo "3) Add bypass MAC"
     echo "4) Remove bypass MAC"
     echo "5) List bypass MAC"
-    echo "6) Apply current config"
-    echo "7) Refresh subscription"
-    echo "8) Test proxy"
-    echo "9) Service status"
-    echo "10) Start"
-    echo "11) Stop"
+    echo "6) Add bypass rule"
+    echo "7) Remove bypass rule"
+    echo "8) List bypass rules"
+    echo "9) Apply current config"
+    echo "10) Refresh subscription"
+    echo "11) Test proxy"
+    echo "12) Service status"
+    echo "13) Start"
+    echo "14) Stop"
     echo "0) Exit"
     printf "Choose: "
     read -r ans
@@ -628,21 +730,34 @@ cmd_menu() {
         list_mac
         ;;
       6)
-        cmd_apply
+        printf "Enter bypass rule: "
+        read -r r
+        add_rule "$r"
         ;;
       7)
-        cmd_refresh
+        printf "Enter bypass rule: "
+        read -r r
+        del_rule "$r"
         ;;
       8)
-        cmd_test
+        list_rules
         ;;
       9)
-        cmd_status
+        cmd_apply
         ;;
       10)
-        cmd_on
+        cmd_refresh
         ;;
       11)
+        cmd_test
+        ;;
+      12)
+        cmd_status
+        ;;
+      13)
+        cmd_on
+        ;;
+      14)
         cmd_off
         ;;
       0)
@@ -670,6 +785,9 @@ case "$cmd" in
   add-bypass-mac) add_mac "${1:-}" ;;
   del-bypass-mac) del_mac "${1:-}" ;;
   list-bypass-mac) list_mac ;;
+  add-bypass-rule) add_rule "${1:-}" ;;
+  del-bypass-rule) del_rule "${1:-}" ;;
+  list-bypass-rules) list_rules ;;
   menu) cmd_menu ;;
   *) fail "unknown command: $cmd" ;;
 esac
@@ -703,6 +821,9 @@ main() {
   echo "  xray-manager add-bypass-mac aa:bb:cc:dd:ee:ff"
   echo "  xray-manager del-bypass-mac aa:bb:cc:dd:ee:ff"
   echo "  xray-manager list-bypass-mac"
+  echo "  xray-manager add-bypass-rule 'vk.com'"
+  echo "  xray-manager del-bypass-rule 'vk.com'"
+  echo "  xray-manager list-bypass-rules"
   echo "  xray-manager show"
 }
 
