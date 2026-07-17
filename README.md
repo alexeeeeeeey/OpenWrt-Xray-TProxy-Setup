@@ -2,11 +2,16 @@
 
 Установка Xray + TProxy + менеджер конфигурации на OpenWrt одной командой.
 
-- можно менять ссылку без переустановки
-- есть поддержка подписок
-- ручное обновление (`refresh`)
-- тест прокси через SOCKS
-- несколько bypass MAC
+Что умеет:
+
+- VLESS/REALITY по ссылке
+- подписки с выбором ноды при импорте
+- повторный выбор ноды без переустановки
+- SOCKS5 upstream, включая локальный `127.0.0.1:1080`
+- локальный SOCKS listener для тестов и приложений
+- bypass по MAC и доменным правилам
+- проверка Xray/nft перед применением конфига
+- автоопределение архитектуры Xray
 
 ---
 
@@ -14,14 +19,14 @@
 
 - OpenWrt 22.03+ (fw4 / nftables)
 - архитектура устройства поддерживается Xray
-- VLESS (желательно REALITY)
+- VLESS желательно с REALITY
 
 ---
 
 ## Установка
 
 ```sh
-opkg update && opkg install curl && sh -c "$(curl -fsSL https://raw.githubusercontent.com/alexeeeeeeey/OpenWrt-Xray-TProxy-Setup/main/install.sh)"
+opkg update && opkg install ca-bundle ca-certificates uclient-fetch && uclient-fetch -q -O - https://raw.githubusercontent.com/alexeeeeeeey/OpenWrt-Xray-TProxy-Setup/main/install.sh | sh
 ```
 
 После установки доступен менеджер:
@@ -34,7 +39,15 @@ xray-manager
 
 ## Быстрый старт
 
-### Обычная VLESS ссылка
+### VLESS ссылка
+
+Сохранить и сразу применить:
+
+```sh
+xray-manager use 'vless://...'
+```
+
+Только сохранить без применения:
 
 ```sh
 xray-manager set 'vless://...'
@@ -43,11 +56,109 @@ xray-manager apply
 
 ---
 
+## Подписка с выбором подключения
+
+Импорт подписки показывает список доступных `vless://` и `socks://` подключений.
+
+```sh
+xray-manager use 'https://example.com/subscription'
+```
+
+Менеджер попросит выбрать номер ноды. Выбор сохраняется в `SUBSCRIPTION_PICK`, поэтому `refresh` будет обновлять именно выбранную ноду.
+
+Посмотреть список заново:
+
+```sh
+xray-manager list-nodes
+```
+
+Выбрать другую ноду:
+
+```sh
+xray-manager select-node 3
+xray-manager apply
+```
+
+Обновить подписку вручную:
+
+```sh
+xray-manager refresh
+```
+
+---
+
+## SOCKS upstream
+
+Если на роутере или рядом уже есть локальный SOCKS5, можно пустить TProxy через него.
+
+По умолчанию используется `127.0.0.1:1080`:
+
+```sh
+xray-manager use-socks
+```
+
+С явным host/port:
+
+```sh
+xray-manager use-socks 127.0.0.1 1080
+```
+
+С авторизацией:
+
+```sh
+xray-manager use 'socks://user:pass@127.0.0.1:1080'
+```
+
+Важно: SOCKS сам по себе не шифрует трафик, поэтому этот режим лучше использовать для локального upstream.
+
+---
+
+## Локальный SOCKS для приложений
+
+Xray поднимает локальный SOCKS5 listener:
+
+```sh
+127.0.0.1:10818
+```
+
+Проверка:
+
+```sh
+xray-manager test
+```
+
+Для `test` нужен рабочий `curl`, потому что он умеет проверять именно SOCKS. Установка, импорт подписок и обновление подписок используют `curl` только если он исправен, иначе переходят на `wget` / `uclient-fetch`.
+
+Изменить адрес/порт listener:
+
+```sh
+xray-manager set-local-socks 127.0.0.1 10818
+xray-manager apply
+```
+
+---
+
+## Управление
+
+```sh
+xray-manager menu
+xray-manager show
+xray-manager show-secret
+xray-manager status
+xray-manager doctor
+xray-manager on
+xray-manager off
+```
+
+`show` не печатает полный текущий URL с секретами. Для отладки есть `show-secret`.
+
+---
+
 ## Routing bypass rules
 
-These rules are now stored in `/etc/xray-manager/config` as `BYPASS_RULES` and are written into Xray `routing.rules` during `apply` / `refresh`.
+Правила хранятся в `/etc/xray-manager/config` как `BYPASS_RULES` и попадают в Xray `routing.rules` во время `apply` / `refresh`.
 
-Default rules:
+Правила по умолчанию:
 
 ```sh
 domain:restream-media.net
@@ -55,7 +166,7 @@ domain:restream-media.net
 .xn--p1ai
 ```
 
-Examples:
+Примеры:
 
 ```sh
 xray-manager add-bypass-rule 'vk.com'
@@ -63,75 +174,76 @@ xray-manager add-bypass-rule '.youtube.com'
 xray-manager add-bypass-rule 'domain:restream-media.net'
 xray-manager list-bypass-rules
 xray-manager del-bypass-rule 'vk.com'
+xray-manager apply
 ```
 
-Note:
-
-- MAC bypass is still handled in `nftables`, because Xray `routing` itself does not match clients by MAC address.
+MAC bypass остаётся в `nftables`, потому что Xray routing не матчится по MAC.
 
 ---
 
-### Подписка
+## Bypass MAC
 
 ```sh
-xray-manager set 'https://example.com/subscription'
-xray-manager refresh
-```
-
----
-
-## Тест прокси
-
-```sh
-xray-manager test
-```
-
-Эквивалент:
-
-```sh
-curl --socks5 127.0.0.1:10818 ifconfig.me
+xray-manager add-bypass-mac aa:bb:cc:dd:ee:ff
+xray-manager del-bypass-mac aa:bb:cc:dd:ee:ff
+xray-manager list-bypass-mac
+xray-manager apply
 ```
 
 ---
 
-## Управление
+## Настройки без лишних цифр
 
-### Основные команды
+Дефолты уже заданы:
+
+- LAN interface: `br-lan`
+- TProxy inbound: `10808`
+- local SOCKS listener: `127.0.0.1:10818`
+- local SOCKS upstream shortcut: `127.0.0.1:1080`
+- fwmark: `1`
+- routing table: `100`
+
+Обычно руками нужен только URL, подписка или команда `use-socks`.
+
+Если LAN интерфейс отличается:
 
 ```sh
-xray-manager menu
-xray-manager show
-xray-manager status
+xray-manager set-lan-iface br-lan
+xray-manager apply
 ```
 
 ---
 
-### Включить / выключить
+## Что создаётся
 
-```sh
-xray-manager on
-xray-manager off
-```
-
----
-
-## Подписки
-
-### Обновить вручную
-
-```sh
-xray-manager refresh
-```
-
-Важно:
-- обновление **не автоматическое**
-- вызывается только вручную или через cron
+- `/usr/bin/xray`
+- `/usr/bin/xray-manager`
+- `/etc/xray/config.json`
+- `/etc/xray/nft.rules`
+- `/etc/init.d/xray`
+- `/etc/init.d/xray-tproxy`
+- `/etc/xray-manager/config`
 
 ---
 
-### Автообновление (пример)
+## Архитектура
 
-Раз в 6 часов:
+Inbounds:
+
+- `local-socks` (`127.0.0.1:10818`) для тестов и локальных приложений
+- `tproxy` (`10808`) для прозрачного проксирования LAN
+
+Outbounds:
+
+- `proxy`: VLESS или SOCKS5 upstream
+- `direct`: прямой выход для bypass
+- `block`: blackhole
+
+---
+
+## Автообновление подписки
+
+Пример: раз в 6 часов.
 
 ```sh
 echo "0 */6 * * * /usr/bin/xray-manager refresh" >> /etc/crontabs/root
@@ -140,115 +252,20 @@ echo "0 */6 * * * /usr/bin/xray-manager refresh" >> /etc/crontabs/root
 
 ---
 
-## Bypass MAC (несколько устройств)
-
-### Добавить
-
-```sh
-xray-manager add-bypass-mac aa:bb:cc:dd:ee:ff
-```
-
-### Удалить
-
-```sh
-xray-manager del-bypass-mac aa:bb:cc:dd:ee:ff
-```
-
-### Список
-
-```sh
-xray-manager list-bypass-mac
-```
-
----
-
-## Что делает система
-
-- ставит пакеты:
-  - `kmod-nft-tproxy`
-  - `kmod-nf-tproxy`
-  - `curl`, `unzip`, `openssl`, `base64`
-- скачивает Xray Core
-- создаёт:
-  - `/etc/xray/config.json`
-  - `/etc/xray/nft.rules`
-  - init-скрипты
-- добавляет менеджер:
-  - `/usr/bin/xray-manager`
-- включает и запускает сервисы
-
----
-
-## Архитектура
-
-- inbound:
-  - `dokodemo-door` (10808) — tproxy
-  - `socks` (10818) — тестирование
-- routing:
-  - локальные сети bypass
-  - заданные MAC bypass
-- outbound:
-  - VLESS (REALITY)
-
----
-
-## Важно
-
-### apply vs refresh
-
-```sh
-xray-manager apply
-```
-
-- пересобирает конфиг
-- перезапускает Xray
-- если режим subscription → также подтягивает обновление
-
-```sh
-xray-manager refresh
-```
-
-- только обновляет подписку
-- затем применяет
-
----
-
-## Ограничения
-
-- из подписки берётся **первая валидная VLESS ссылка**
-- нет выбора ноды (пока)
-- нет LuCI интерфейса
-- нет автообновления без cron
-
----
-
 ## Диагностика
 
-### Проверка Xray
-
 ```sh
+xray-manager doctor
 xray-manager status
-```
-
-### Проверка прокси
-
-```sh
 xray-manager test
 ```
 
----
+`doctor` проверяет state, Xray config и nft rules. Если новый конфиг не проходит проверку, старый рабочий конфиг не перезаписывается.
 
-## Минимальный workflow
-
-```sh
-xray-manager set 'https://sub'
-xray-manager refresh
-xray-manager test
-```
-
-или
+Если после `opkg install curl` появляется ошибка вида `symbol not found`, значит `curl` и `libcurl` не совпали по версии. Для установки менеджера `curl` больше не нужен:
 
 ```sh
-xray-manager set 'vless://...'
-xray-manager apply
+opkg update
+opkg install ca-bundle ca-certificates uclient-fetch
+uclient-fetch -q -O - https://raw.githubusercontent.com/alexeeeeeeey/OpenWrt-Xray-TProxy-Setup/main/install.sh | sh
 ```
