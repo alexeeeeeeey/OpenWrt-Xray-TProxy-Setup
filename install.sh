@@ -2,7 +2,7 @@
 
 set -eu
 
-XRAY_VERSION="${XRAY_VERSION:-25.12.8}"
+XRAY_VERSION="${XRAY_VERSION:-26.7.28}"
 XRAY_ARCH="${XRAY_ARCH:-}"
 XRAY_URL=""
 
@@ -11,6 +11,7 @@ STATE_FILE="${BASE_DIR}/config"
 XRAY_DIR="/etc/xray"
 XRAY_CONFIG="${XRAY_DIR}/config.json"
 NFT_RULES="${XRAY_DIR}/nft.rules"
+LINKS_FILE="${BASE_DIR}/links"
 
 DEFAULT_BYPASS_RULES="domain:restream-media.net,.ru,.xn--p1ai"
 DEFAULT_LAN_IFACE="br-lan"
@@ -53,7 +54,9 @@ CURRENT_URL=""
 SUBSCRIPTION_URL=""
 SUBSCRIPTION_PICK="1"
 BYPASS_MACS=""
+BYPASS_MACS_DISABLED=""
 BYPASS_RULES="${DEFAULT_BYPASS_RULES}"
+BYPASS_RULES_DISABLED=""
 LAN_IFACE="${DEFAULT_LAN_IFACE}"
 TPROXY_PORT="${DEFAULT_TPROXY_PORT}"
 TPROXY_MARK="${DEFAULT_TPROXY_MARK}"
@@ -61,8 +64,11 @@ TPROXY_TABLE="${DEFAULT_TPROXY_TABLE}"
 LOCAL_SOCKS_LISTEN="${DEFAULT_LOCAL_SOCKS_LISTEN}"
 LOCAL_SOCKS_PORT="${DEFAULT_LOCAL_SOCKS_PORT}"
 LAST_SOURCE=""
+ACTIVE_PROFILE_ID=""
 EOF
     chmod 0600 "$STATE_FILE"
+    : > "$LINKS_FILE"
+    chmod 0600 "$LINKS_FILE"
     return 0
   fi
 
@@ -71,7 +77,9 @@ EOF
   append_state_key SUBSCRIPTION_URL ""
   append_state_key SUBSCRIPTION_PICK "1"
   append_state_key BYPASS_MACS ""
+  append_state_key BYPASS_MACS_DISABLED ""
   append_state_key BYPASS_RULES "$DEFAULT_BYPASS_RULES"
+  append_state_key BYPASS_RULES_DISABLED ""
   append_state_key LAN_IFACE "$DEFAULT_LAN_IFACE"
   append_state_key TPROXY_PORT "$DEFAULT_TPROXY_PORT"
   append_state_key TPROXY_MARK "$DEFAULT_TPROXY_MARK"
@@ -79,13 +87,16 @@ EOF
   append_state_key LOCAL_SOCKS_LISTEN "$DEFAULT_LOCAL_SOCKS_LISTEN"
   append_state_key LOCAL_SOCKS_PORT "$DEFAULT_LOCAL_SOCKS_PORT"
   append_state_key LAST_SOURCE ""
+  append_state_key ACTIVE_PROFILE_ID ""
+  touch "$LINKS_FILE"
+  chmod 0600 "$LINKS_FILE"
   chmod 0600 "$STATE_FILE"
 }
 
 install_packages() {
   echo "Installing packages"
   opkg update
-  opkg install kmod-nft-tproxy kmod-nf-tproxy unzip uclient-fetch ca-bundle ca-certificates openssl-util coreutils-base64
+  opkg install kmod-nft-tproxy kmod-nf-tproxy unzip uclient-fetch ca-bundle ca-certificates openssl-util coreutils-base64 uhttpd
 }
 
 download_file() {
@@ -213,6 +224,7 @@ STATE_FILE="${BASE_DIR}/config"
 XRAY_DIR="/etc/xray"
 XRAY_CONFIG="${XRAY_DIR}/config.json"
 NFT_RULES="${XRAY_DIR}/nft.rules"
+LINKS_FILE="${BASE_DIR}/links"
 
 DEFAULT_BYPASS_RULES="domain:restream-media.net,.ru,.xn--p1ai"
 DEFAULT_LAN_IFACE="br-lan"
@@ -232,15 +244,23 @@ warn() {
 }
 
 json_escape() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+  printf '%s' "$1" | tr '\r\n\t' '   ' | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
 state_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\$/\\$/g; s/`/\\`/g'
 }
 
+b64_encode() {
+  printf '%s' "$1" | base64 | tr -d '\r\n'
+}
+
+b64_decode() {
+  printf '%s' "$1" | base64 -d 2>/dev/null
+}
+
 url_decode() {
-  encoded="$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')"
+  encoded="$(printf '%s' "$1" | sed 's/%/\\x/g')"
   printf '%b' "$encoded"
 }
 
@@ -268,6 +288,12 @@ validate_iface() {
   iface="${1:-}"
   [ -n "$iface" ] || fail "interface name is empty"
   printf '%s' "$iface" | grep -Eq '^[A-Za-z0-9_.:-]+$' || fail "invalid interface name: $iface"
+}
+
+validate_single_line() {
+  value="$1"
+  cleaned="$(printf '%s' "$value" | tr -d '\r\n')"
+  [ "$cleaned" = "$value" ] || fail "value must be a single line"
 }
 
 json_string_or_empty() {
@@ -309,7 +335,11 @@ load_state() {
   : "${SUBSCRIPTION_URL:=}"
   : "${SUBSCRIPTION_PICK:=1}"
   : "${BYPASS_MACS:=}"
-  : "${BYPASS_RULES:=$DEFAULT_BYPASS_RULES}"
+  : "${BYPASS_MACS_DISABLED:=}"
+  if [ "${BYPASS_RULES+x}" != "x" ]; then
+    BYPASS_RULES="$DEFAULT_BYPASS_RULES"
+  fi
+  : "${BYPASS_RULES_DISABLED:=}"
   : "${LAN_IFACE:=$DEFAULT_LAN_IFACE}"
   : "${TPROXY_PORT:=$DEFAULT_TPROXY_PORT}"
   : "${TPROXY_MARK:=$DEFAULT_TPROXY_MARK}"
@@ -317,6 +347,9 @@ load_state() {
   : "${LOCAL_SOCKS_LISTEN:=$DEFAULT_LOCAL_SOCKS_LISTEN}"
   : "${LOCAL_SOCKS_PORT:=$DEFAULT_LOCAL_SOCKS_PORT}"
   : "${LAST_SOURCE:=}"
+  : "${ACTIVE_PROFILE_ID:=}"
+  touch "$LINKS_FILE"
+  chmod 0600 "$LINKS_FILE"
 }
 
 save_state() {
@@ -328,7 +361,9 @@ CURRENT_URL="$(state_escape "${CURRENT_URL:-}")"
 SUBSCRIPTION_URL="$(state_escape "${SUBSCRIPTION_URL:-}")"
 SUBSCRIPTION_PICK="$(state_escape "${SUBSCRIPTION_PICK:-1}")"
 BYPASS_MACS="$(state_escape "${BYPASS_MACS:-}")"
+BYPASS_MACS_DISABLED="$(state_escape "${BYPASS_MACS_DISABLED:-}")"
 BYPASS_RULES="$(state_escape "${BYPASS_RULES:-}")"
+BYPASS_RULES_DISABLED="$(state_escape "${BYPASS_RULES_DISABLED:-}")"
 LAN_IFACE="$(state_escape "${LAN_IFACE:-$DEFAULT_LAN_IFACE}")"
 TPROXY_PORT="$(state_escape "${TPROXY_PORT:-$DEFAULT_TPROXY_PORT}")"
 TPROXY_MARK="$(state_escape "${TPROXY_MARK:-$DEFAULT_TPROXY_MARK}")"
@@ -336,6 +371,7 @@ TPROXY_TABLE="$(state_escape "${TPROXY_TABLE:-$DEFAULT_TPROXY_TABLE}")"
 LOCAL_SOCKS_LISTEN="$(state_escape "${LOCAL_SOCKS_LISTEN:-$DEFAULT_LOCAL_SOCKS_LISTEN}")"
 LOCAL_SOCKS_PORT="$(state_escape "${LOCAL_SOCKS_PORT:-$DEFAULT_LOCAL_SOCKS_PORT}")"
 LAST_SOURCE="$(state_escape "${LAST_SOURCE:-}")"
+ACTIVE_PROFILE_ID="$(state_escape "${ACTIVE_PROFILE_ID:-}")"
 EOS
   chmod 0600 "$STATE_FILE"
 }
@@ -351,20 +387,20 @@ get_query_param_decoded() {
 }
 
 extract_supported_urls() {
-  awk '/^vless:\/\// || /^socks:\/\// || /^socks5:\/\// { print }'
+  awk '/^vless:\/\// || /^socks:\/\// || /^socks5:\/\// || /^hysteria2:\/\// || /^hy2:\/\// { print }'
 }
 
 decode_subscription_blob() {
   tmp_in="$1"
 
-  if grep -Eq 'vless://|socks://|socks5://' "$tmp_in"; then
+  if grep -Eq 'vless://|socks://|socks5://|hysteria2://|hy2://' "$tmp_in"; then
     cat "$tmp_in"
     return 0
   fi
 
   if command -v base64 >/dev/null 2>&1; then
     decoded="$(base64 -d "$tmp_in" 2>/dev/null || true)"
-    if printf '%s\n' "$decoded" | grep -Eq 'vless://|socks://|socks5://'; then
+    if printf '%s\n' "$decoded" | grep -Eq 'vless://|socks://|socks5://|hysteria2://|hy2://'; then
       printf '%s\n' "$decoded"
       return 0
     fi
@@ -372,7 +408,7 @@ decode_subscription_blob() {
 
   if command -v openssl >/dev/null 2>&1; then
     decoded="$(openssl base64 -d -A -in "$tmp_in" 2>/dev/null || true)"
-    if printf '%s\n' "$decoded" | grep -Eq 'vless://|socks://|socks5://'; then
+    if printf '%s\n' "$decoded" | grep -Eq 'vless://|socks://|socks5://|hysteria2://|hy2://'; then
       printf '%s\n' "$decoded"
       return 0
     fi
@@ -394,7 +430,7 @@ fetch_subscription_urls_file() {
   decode_subscription_blob "$tmp_raw" | tr -d '\r' | extract_supported_urls > "$out_file"
   rm -f "$tmp_raw"
 
-  [ -s "$out_file" ] || fail "no supported vless:// or socks:// entries found in subscription"
+  [ -s "$out_file" ] || fail "no supported VLESS, Hysteria2 or SOCKS entries found in subscription"
 }
 
 line_count() {
@@ -439,6 +475,7 @@ validate_pick() {
 url_kind() {
   case "$1" in
     vless://*) echo "vless" ;;
+    hysteria2://*|hy2://*) echo "hysteria2" ;;
     socks://*|socks5://*) echo "socks" ;;
     *) echo "unknown" ;;
   esac
@@ -526,6 +563,261 @@ resolve_subscription_to_url() {
   printf '%s\n' "$selected"
 }
 
+validate_profile_id() {
+  printf '%s' "${1:-}" | grep -Eq '^[0-9A-Za-z_-]+$' || fail "invalid profile id"
+}
+
+profile_url_exists() {
+  encoded_url="$(b64_encode "$1")"
+  awk -F '|' -v wanted="$encoded_url" '$4 == wanted { found=1 } END { exit !found }' "$LINKS_FILE"
+}
+
+profile_id_for_url() {
+  encoded_url="$(b64_encode "$1")"
+  awk -F '|' -v wanted="$encoded_url" '$4 == wanted { print $1; exit }' "$LINKS_FILE"
+}
+
+profile_url_by_id() {
+  profile_id="$1"
+  validate_profile_id "$profile_id"
+  encoded_url="$(awk -F '|' -v wanted="$profile_id" '$1 == wanted { print $4; exit }' "$LINKS_FILE")"
+  [ -n "$encoded_url" ] || fail "profile not found: $profile_id"
+  b64_decode "$encoded_url"
+}
+
+profile_enabled_by_id() {
+  profile_id="$1"
+  validate_profile_id "$profile_id"
+  awk -F '|' -v wanted="$profile_id" '$1 == wanted { print $2; exit }' "$LINKS_FILE"
+}
+
+profile_source_by_id() {
+  profile_id="$1"
+  validate_profile_id "$profile_id"
+  encoded_source="$(awk -F '|' -v wanted="$profile_id" '$1 == wanted { print $5; exit }' "$LINKS_FILE")"
+  [ -n "$encoded_source" ] || fail "profile not found: $profile_id"
+  b64_decode "$encoded_source"
+}
+
+sync_subscription_loaded() {
+  sub_url="$1"
+  urls_file="$2"
+  source_b64="$(b64_encode "$sub_url")"
+  tmp_links="$(mktemp)"
+  tmp_seen="$(mktemp)"
+  existing_count="$(awk -F '|' -v source="$source_b64" '$5 == source { count++ } END { print count + 0 }' "$LINKS_FILE")"
+
+  awk -F '|' -v source="$source_b64" '$5 != source { print }' "$LINKS_FILE" > "$tmp_links"
+  SYNC_ADDED=0
+  SYNC_KEPT=0
+  while IFS= read -r profile_url; do
+    [ -n "$profile_url" ] || continue
+    build_proxy_outbound_json "$profile_url" >/dev/null
+    profile_url_b64="$(b64_encode "$profile_url")"
+    grep -qxF "$profile_url_b64" "$tmp_seen" 2>/dev/null && continue
+    printf '%s\n' "$profile_url_b64" >> "$tmp_seen"
+
+    existing_line="$(awk -F '|' -v source="$source_b64" -v url="$profile_url_b64" '$5 == source && $4 == url { print; exit }' "$LINKS_FILE")"
+    if [ -n "$existing_line" ]; then
+      printf '%s\n' "$existing_line" >> "$tmp_links"
+      SYNC_KEPT=$((SYNC_KEPT + 1))
+      continue
+    fi
+
+    profile_name="$(node_label "$profile_url")"
+    profile_name="$(printf '%s' "$profile_name" | tr '\r\n\t' '   ' | cut -c 1-72)"
+    profile_id="$(date +%s)-$$-$((SYNC_ADDED + 1))-$(wc -l < "$tmp_links" | tr -d ' ')"
+    printf '%s|1|%s|%s|%s\n' \
+      "$profile_id" \
+      "$(b64_encode "$profile_name")" \
+      "$profile_url_b64" \
+      "$source_b64" >> "$tmp_links"
+    SYNC_ADDED=$((SYNC_ADDED + 1))
+  done < "$urls_file"
+
+  SYNC_REMOVED=$((existing_count - SYNC_KEPT))
+  mv "$tmp_links" "$LINKS_FILE"
+  rm -f "$tmp_seen"
+  chmod 0600 "$LINKS_FILE"
+
+  if [ -n "${ACTIVE_PROFILE_ID:-}" ]; then
+    active_exists="$(awk -F '|' -v wanted="$ACTIVE_PROFILE_ID" '$1 == wanted { print 1; exit }' "$LINKS_FILE")"
+    if [ "$active_exists" != "1" ]; then
+      ACTIVE_PROFILE_ID=""
+      CURRENT_URL=""
+    fi
+  fi
+
+  if [ -z "${ACTIVE_PROFILE_ID:-}" ]; then
+    first_profile_id="$(awk -F '|' -v source="$source_b64" '$5 == source && $2 == 1 { print $1; exit }' "$LINKS_FILE")"
+    if [ -n "$first_profile_id" ]; then
+      ACTIVE_PROFILE_ID="$first_profile_id"
+      CURRENT_URL="$(profile_url_by_id "$first_profile_id")"
+      MODE="url"
+    fi
+  fi
+}
+
+profile_add_loaded() {
+  profile_url="$1"
+  profile_name="${2:-}"
+  profile_source="${3:-manual}"
+  validate_single_line "$profile_url"
+  build_proxy_outbound_json "$profile_url" >/dev/null
+
+  if profile_url_exists "$profile_url"; then
+    PROFILE_RESULT_ID="$(profile_id_for_url "$profile_url")"
+    return 0
+  fi
+
+  [ -n "$profile_name" ] || profile_name="$(node_label "$profile_url")"
+  profile_name="$(printf '%s' "$profile_name" | tr '\r\n\t' '   ' | cut -c 1-72)"
+  PROFILE_RESULT_ID="$(date +%s)-$$-$(wc -l < "$LINKS_FILE" | tr -d ' ')"
+  printf '%s|1|%s|%s|%s\n' \
+    "$PROFILE_RESULT_ID" \
+    "$(b64_encode "$profile_name")" \
+    "$(b64_encode "$profile_url")" \
+    "$(b64_encode "$profile_source")" >> "$LINKS_FILE"
+  chmod 0600 "$LINKS_FILE"
+}
+
+cmd_add_link() {
+  load_state
+  profile_url="${1:-}"
+  [ -n "$profile_url" ] || fail "usage: xray-manager add-link <url> [name]"
+  profile_add_loaded "$profile_url" "${2:-}" "manual"
+  if [ -z "${ACTIVE_PROFILE_ID:-}" ]; then
+    ACTIVE_PROFILE_ID="$PROFILE_RESULT_ID"
+    CURRENT_URL="$profile_url"
+    MODE="url"
+  fi
+  save_state
+  echo "Profile saved: $PROFILE_RESULT_ID"
+}
+
+cmd_import_links() {
+  load_state
+  sub_url="${1:-}"
+  case "$sub_url" in
+    http://*|https://*) ;;
+    *) fail "usage: xray-manager import-links <subscription-url>" ;;
+  esac
+
+  tmp_urls="$(mktemp)"
+  fetch_subscription_urls_file "$sub_url" "$tmp_urls"
+  sync_subscription_loaded "$sub_url" "$tmp_urls"
+  rm -f "$tmp_urls"
+  save_state
+  echo "Subscription updated: added $SYNC_ADDED, kept $SYNC_KEPT, removed $SYNC_REMOVED"
+}
+
+cmd_refresh_links() {
+  load_state
+  sub_url="${1:-}"
+  case "$sub_url" in
+    http://*|https://*) ;;
+    *) fail "usage: xray-manager refresh-links <subscription-url>" ;;
+  esac
+  source_b64="$(b64_encode "$sub_url")"
+  existing_count="$(awk -F '|' -v source="$source_b64" '$5 == source { count++ } END { print count + 0 }' "$LINKS_FILE")"
+  [ "$existing_count" -gt 0 ] || fail "subscription not found"
+
+  tmp_urls="$(mktemp)"
+  fetch_subscription_urls_file "$sub_url" "$tmp_urls"
+  sync_subscription_loaded "$sub_url" "$tmp_urls"
+  rm -f "$tmp_urls"
+  save_state
+  echo "Subscription updated: added $SYNC_ADDED, kept $SYNC_KEPT, removed $SYNC_REMOVED"
+}
+
+cmd_refresh_all_links() {
+  load_state
+  tmp_sources="$(mktemp)"
+  while IFS='|' read -r _ _ _ _ source_b64; do
+    [ -n "$source_b64" ] || continue
+    source="$(b64_decode "$source_b64")"
+    case "$source" in http://*|https://*) printf '%s\n' "$source_b64" ;; esac
+  done < "$LINKS_FILE" | awk '!seen[$0]++' > "$tmp_sources"
+  [ -s "$tmp_sources" ] || { rm -f "$tmp_sources"; fail "no subscriptions configured"; }
+  while IFS= read -r source_b64; do
+    cmd_refresh_links "$(b64_decode "$source_b64")"
+  done < "$tmp_sources"
+  rm -f "$tmp_sources"
+}
+
+cmd_list_links() {
+  load_state
+  if [ ! -s "$LINKS_FILE" ]; then
+    echo "No profiles configured"
+    return 0
+  fi
+  while IFS='|' read -r profile_id profile_enabled profile_name_b64 profile_url_b64 profile_source_b64; do
+    [ -n "$profile_id" ] || continue
+    profile_url="$(b64_decode "$profile_url_b64")"
+    profile_name="$(b64_decode "$profile_name_b64")"
+    marker=" "
+    [ "$profile_id" = "${ACTIVE_PROFILE_ID:-}" ] && marker="*"
+    status="off"
+    [ "$profile_enabled" = "1" ] && status="on"
+    printf '%s %-22s [%s] %-10s %s\n' "$marker" "$profile_id" "$status" "$(url_kind "$profile_url")" "$profile_name"
+  done < "$LINKS_FILE"
+}
+
+cmd_select_link() {
+  load_state
+  profile_id="${1:-}"
+  validate_profile_id "$profile_id"
+  [ "$(profile_enabled_by_id "$profile_id")" = "1" ] || fail "profile is disabled"
+  CURRENT_URL="$(profile_url_by_id "$profile_id")"
+  ACTIVE_PROFILE_ID="$profile_id"
+  MODE="url"
+  LAST_SOURCE="profile-select"
+  save_state
+  echo "Selected: $(describe_url "$CURRENT_URL")"
+  echo "Run: xray-manager apply"
+}
+
+cmd_use_link() {
+  cmd_select_link "${1:-}"
+  cmd_apply
+}
+
+cmd_set_link_enabled() {
+  load_state
+  profile_id="${1:-}"
+  requested="${2:-}"
+  validate_profile_id "$profile_id"
+  case "$requested" in 0|1) ;; *) fail "enabled must be 0 or 1" ;; esac
+  profile_exists="$(awk -F '|' -v wanted="$profile_id" '$1 == wanted { print 1; exit }' "$LINKS_FILE")"
+  [ "$profile_exists" = "1" ] || fail "profile not found: $profile_id"
+  tmp_links="$(mktemp)"
+  awk -F '|' -v OFS='|' -v wanted="$profile_id" -v enabled="$requested" '$1 == wanted { $2=enabled } { print }' "$LINKS_FILE" > "$tmp_links"
+  mv "$tmp_links" "$LINKS_FILE"
+  chmod 0600 "$LINKS_FILE"
+  if [ "$requested" = "0" ] && [ "$profile_id" = "${ACTIVE_PROFILE_ID:-}" ]; then
+    ACTIVE_PROFILE_ID=""
+    CURRENT_URL=""
+    save_state
+  fi
+  echo "Profile updated"
+}
+
+cmd_del_link() {
+  load_state
+  profile_id="${1:-}"
+  validate_profile_id "$profile_id"
+  tmp_links="$(mktemp)"
+  awk -F '|' -v wanted="$profile_id" '$1 != wanted { print }' "$LINKS_FILE" > "$tmp_links"
+  mv "$tmp_links" "$LINKS_FILE"
+  chmod 0600 "$LINKS_FILE"
+  if [ "$profile_id" = "${ACTIVE_PROFILE_ID:-}" ]; then
+    ACTIVE_PROFILE_ID=""
+    CURRENT_URL=""
+  fi
+  save_state
+  echo "Profile removed"
+}
+
 normalize_mac() {
   printf '%s' "$1" | tr 'A-Z' 'a-z'
 }
@@ -541,6 +833,7 @@ validate_mac() {
 
 validate_bypass_rule() {
   rule="$(normalize_bypass_rule "$1")"
+  validate_single_line "$rule"
   [ -n "$rule" ] || fail "empty bypass rule"
   case "$rule" in
     *\"*|*\\*|*,*)
@@ -566,14 +859,28 @@ join_comma_lines() {
 
 mac_exists() {
   m="$(normalize_mac "$1")"
-  [ -n "${BYPASS_MACS:-}" ] || return 1
-  printf '%s\n' "$BYPASS_MACS" | tr ',' '\n' | grep -qx "$m"
+  printf '%s,%s\n' "${BYPASS_MACS:-}" "${BYPASS_MACS_DISABLED:-}" | tr ',' '\n' | grep -qx "$m"
 }
 
 rule_exists() {
   r="$(normalize_bypass_rule "$1")"
-  [ -n "${BYPASS_RULES:-}" ] || return 1
-  printf '%s\n' "$BYPASS_RULES" | tr ',' '\n' | grep -Fxq "$r"
+  printf '%s,%s\n' "${BYPASS_RULES:-}" "${BYPASS_RULES_DISABLED:-}" | tr ',' '\n' | grep -Fxq "$r"
+}
+
+comma_remove_fixed() {
+  list_value="$1"
+  item_value="$2"
+  printf '%s\n' "$list_value" | tr ',' '\n' | grep -Fvx "$item_value" | join_comma_lines || true
+}
+
+comma_append() {
+  list_value="$1"
+  item_value="$2"
+  if [ -n "$list_value" ]; then
+    printf '%s,%s' "$list_value" "$item_value"
+  else
+    printf '%s' "$item_value"
+  fi
 }
 
 add_mac() {
@@ -605,13 +912,13 @@ del_mac() {
   validate_mac "$m"
   m="$(normalize_mac "$m")"
 
-  if [ -z "${BYPASS_MACS:-}" ]; then
+  if [ -z "${BYPASS_MACS:-}${BYPASS_MACS_DISABLED:-}" ]; then
     echo "No bypass MACs configured"
     return 0
   fi
 
-  BYPASS_MACS="$(printf '%s\n' "$BYPASS_MACS" | tr ',' '\n' | grep -vx "$m" || true)"
-  BYPASS_MACS="$(printf '%s\n' "$BYPASS_MACS" | join_comma_lines)"
+  BYPASS_MACS="$(comma_remove_fixed "${BYPASS_MACS:-}" "$m")"
+  BYPASS_MACS_DISABLED="$(comma_remove_fixed "${BYPASS_MACS_DISABLED:-}" "$m")"
 
   save_state
   echo "MAC removed. Run: xray-manager apply"
@@ -619,11 +926,12 @@ del_mac() {
 
 list_mac() {
   load_state
-  if [ -z "${BYPASS_MACS:-}" ]; then
+  if [ -z "${BYPASS_MACS:-}${BYPASS_MACS_DISABLED:-}" ]; then
     echo "No bypass MACs configured"
     return 0
   fi
-  printf '%s\n' "$BYPASS_MACS" | tr ',' '\n'
+  printf '%s\n' "${BYPASS_MACS:-}" | tr ',' '\n' | sed '/^$/d; s/^/[on]  /'
+  printf '%s\n' "${BYPASS_MACS_DISABLED:-}" | tr ',' '\n' | sed '/^$/d; s/^/[off] /'
 }
 
 add_rule() {
@@ -655,13 +963,13 @@ del_rule() {
   validate_bypass_rule "$r"
   r="$(normalize_bypass_rule "$r")"
 
-  if [ -z "${BYPASS_RULES:-}" ]; then
+  if [ -z "${BYPASS_RULES:-}${BYPASS_RULES_DISABLED:-}" ]; then
     echo "No bypass rules configured"
     return 0
   fi
 
-  BYPASS_RULES="$(printf '%s\n' "$BYPASS_RULES" | tr ',' '\n' | grep -Fvx "$r" || true)"
-  BYPASS_RULES="$(printf '%s\n' "$BYPASS_RULES" | join_comma_lines)"
+  BYPASS_RULES="$(comma_remove_fixed "${BYPASS_RULES:-}" "$r")"
+  BYPASS_RULES_DISABLED="$(comma_remove_fixed "${BYPASS_RULES_DISABLED:-}" "$r")"
 
   save_state
   echo "Bypass rule removed. Run: xray-manager apply"
@@ -669,11 +977,50 @@ del_rule() {
 
 list_rules() {
   load_state
-  if [ -z "${BYPASS_RULES:-}" ]; then
+  if [ -z "${BYPASS_RULES:-}${BYPASS_RULES_DISABLED:-}" ]; then
     echo "No bypass rules configured"
     return 0
   fi
-  printf '%s\n' "$BYPASS_RULES" | tr ',' '\n'
+  printf '%s\n' "${BYPASS_RULES:-}" | tr ',' '\n' | sed '/^$/d; s/^/[on]  /'
+  printf '%s\n' "${BYPASS_RULES_DISABLED:-}" | tr ',' '\n' | sed '/^$/d; s/^/[off] /'
+}
+
+cmd_set_bypass_mac() {
+  load_state
+  m="${1:-}"
+  enabled="${2:-}"
+  validate_mac "$m"
+  m="$(normalize_mac "$m")"
+  case "$enabled" in 0|1) ;; *) fail "enabled must be 0 or 1" ;; esac
+  mac_exists "$m" || fail "MAC not found: $m"
+  BYPASS_MACS="$(comma_remove_fixed "${BYPASS_MACS:-}" "$m")"
+  BYPASS_MACS_DISABLED="$(comma_remove_fixed "${BYPASS_MACS_DISABLED:-}" "$m")"
+  if [ "$enabled" = "1" ]; then
+    BYPASS_MACS="$(comma_append "$BYPASS_MACS" "$m")"
+  else
+    BYPASS_MACS_DISABLED="$(comma_append "$BYPASS_MACS_DISABLED" "$m")"
+  fi
+  save_state
+  echo "MAC updated. Run: xray-manager apply"
+}
+
+cmd_set_bypass_rule() {
+  load_state
+  r="${1:-}"
+  enabled="${2:-}"
+  validate_bypass_rule "$r"
+  r="$(normalize_bypass_rule "$r")"
+  case "$enabled" in 0|1) ;; *) fail "enabled must be 0 or 1" ;; esac
+  rule_exists "$r" || fail "bypass rule not found: $r"
+  BYPASS_RULES="$(comma_remove_fixed "${BYPASS_RULES:-}" "$r")"
+  BYPASS_RULES_DISABLED="$(comma_remove_fixed "${BYPASS_RULES_DISABLED:-}" "$r")"
+  if [ "$enabled" = "1" ]; then
+    BYPASS_RULES="$(comma_append "$BYPASS_RULES" "$r")"
+  else
+    BYPASS_RULES_DISABLED="$(comma_append "$BYPASS_RULES_DISABLED" "$r")"
+  fi
+  save_state
+  echo "Bypass rule updated. Run: xray-manager apply"
 }
 
 parse_host_port() {
@@ -755,6 +1102,7 @@ parse_vless() {
   [ -n "$WS_PATH" ] || WS_PATH="/"
   WS_HOST="$(get_query_param_decoded host)"
   GRPC_SERVICE_NAME="$(get_query_param_decoded serviceName)"
+  XHTTP_MODE="$(get_query_param_decoded mode)"
 
   case "$SECURITY" in
     reality)
@@ -779,10 +1127,13 @@ parse_vless() {
   WS_PATH_ESC="$(json_escape "$WS_PATH")"
   WS_HOST_ESC="$(json_escape "$WS_HOST")"
   GRPC_SERVICE_NAME_ESC="$(json_escape "$GRPC_SERVICE_NAME")"
+  XHTTP_MODE_ESC="$(json_escape "$XHTTP_MODE")"
 
   FLOW_LINE=""
-  [ -n "$FLOW" ] && FLOW_LINE=",
+  if [ -n "$FLOW" ]; then
+    FLOW_LINE=",
                 \"flow\": \"$(json_escape "$FLOW")\""
+  fi
 }
 
 build_vless_stream_extra_json() {
@@ -829,6 +1180,18 @@ build_vless_stream_extra_json() {
         \"grpcSettings\": {
           \"serviceName\": \"${GRPC_SERVICE_NAME_ESC}\"
         }"
+      ;;
+    xhttp|splithttp)
+      XHTTP_MODE_JSON=""
+      [ -n "$XHTTP_MODE" ] && XHTTP_MODE_JSON=",
+          \"mode\": \"${XHTTP_MODE_ESC}\""
+      VLESS_STREAM_EXTRA_JSON="${VLESS_STREAM_EXTRA_JSON},
+        \"xhttpSettings\": {
+          \"path\": \"${WS_PATH_ESC}\",
+          \"host\": \"${WS_HOST_ESC}\"${XHTTP_MODE_JSON}
+        }"
+      TYPE="xhttp"
+      TYPE_ESC="xhttp"
       ;;
   esac
 }
@@ -929,11 +1292,109 @@ build_socks_outbound_json() {
 EOS
 }
 
+parse_hysteria2() {
+  HYSTERIA_URL="$1"
+  case "$HYSTERIA_URL" in
+    hysteria2://*|hy2://*) ;;
+    *) fail "Hysteria2 URL must start with hysteria2:// or hy2://" ;;
+  esac
+
+  RAW="${HYSTERIA_URL#*://}"
+  MAIN="${RAW%%#*}"
+  AUTHORITY="${MAIN%%\?*}"
+  if [ "$AUTHORITY" = "$MAIN" ]; then
+    QUERY=""
+  else
+    QUERY="${MAIN#*\?}"
+  fi
+
+  HYSTERIA_AUTH=""
+  HOST_PORT="$AUTHORITY"
+  case "$AUTHORITY" in
+    *@*)
+      HYSTERIA_AUTH="$(url_decode "${AUTHORITY%%@*}")"
+      HOST_PORT="${AUTHORITY#*@}"
+      ;;
+  esac
+  HOST_PORT="${HOST_PORT%/}"
+  parse_host_port "$HOST_PORT" "443"
+  HYSTERIA_HOST="$PARSED_HOST"
+  HYSTERIA_PORT="$PARSED_PORT"
+  HYSTERIA_SNI="$(get_query_param_decoded sni)"
+  [ -n "$HYSTERIA_SNI" ] || HYSTERIA_SNI="$HYSTERIA_HOST"
+  HYSTERIA_FP="$(get_query_param_decoded fp)"
+  HYSTERIA_INSECURE="$(get_query_param_decoded insecure)"
+  HYSTERIA_PIN="$(get_query_param_decoded pinSHA256)"
+  [ -n "$HYSTERIA_PIN" ] || HYSTERIA_PIN="$(get_query_param_decoded pinsha256)"
+  HYSTERIA_OBFS="$(get_query_param_decoded obfs)"
+  HYSTERIA_OBFS_PASSWORD="$(get_query_param_decoded obfs-password)"
+
+  HYSTERIA_HOST_ESC="$(json_escape "$HYSTERIA_HOST")"
+  HYSTERIA_AUTH_ESC="$(json_escape "$HYSTERIA_AUTH")"
+  HYSTERIA_SNI_ESC="$(json_escape "$HYSTERIA_SNI")"
+  HYSTERIA_FP_ESC="$(json_escape "$HYSTERIA_FP")"
+  HYSTERIA_PIN_ESC="$(json_escape "$HYSTERIA_PIN")"
+  HYSTERIA_OBFS_PASSWORD_ESC="$(json_escape "$HYSTERIA_OBFS_PASSWORD")"
+}
+
+build_hysteria2_outbound_json() {
+  parse_hysteria2 "$1"
+  case "$HYSTERIA_INSECURE" in
+    1|true|TRUE|yes) HYSTERIA_INSECURE_JSON="true" ;;
+    *) HYSTERIA_INSECURE_JSON="false" ;;
+  esac
+
+  HYSTERIA_FP_JSON=""
+  [ -n "$HYSTERIA_FP" ] && HYSTERIA_FP_JSON=",
+          \"fingerprint\": \"${HYSTERIA_FP_ESC}\""
+  HYSTERIA_PIN_JSON=""
+  [ -n "$HYSTERIA_PIN" ] && HYSTERIA_PIN_JSON=",
+          \"pinnedPeerCertSha256\": \"${HYSTERIA_PIN_ESC}\""
+  HYSTERIA_MASK_JSON=""
+  if [ "$HYSTERIA_OBFS" = "salamander" ] && [ -n "$HYSTERIA_OBFS_PASSWORD" ]; then
+    HYSTERIA_MASK_JSON=",
+        \"finalmask\": {
+          \"udp\": [
+            {
+              \"type\": \"salamander\",
+              \"settings\": { \"password\": \"${HYSTERIA_OBFS_PASSWORD_ESC}\" }
+            }
+          ]
+        }"
+  fi
+
+  cat <<EOS
+    {
+      "tag": "proxy",
+      "protocol": "hysteria",
+      "settings": {
+        "version": 2,
+        "address": "${HYSTERIA_HOST_ESC}",
+        "port": ${HYSTERIA_PORT}
+      },
+      "streamSettings": {
+        "network": "hysteria",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "${HYSTERIA_SNI_ESC}",
+          "alpn": ["h3"],
+          "allowInsecure": ${HYSTERIA_INSECURE_JSON}${HYSTERIA_FP_JSON}${HYSTERIA_PIN_JSON}
+        },
+        "hysteriaSettings": {
+          "version": 2,
+          "auth": "${HYSTERIA_AUTH_ESC}"
+        }${HYSTERIA_MASK_JSON}
+      }
+    }
+EOS
+}
+
 build_proxy_outbound_json() {
   case "$1" in
     vless://*) build_vless_outbound_json "$1" ;;
+    hysteria2://*|hy2://*) build_hysteria2_outbound_json "$1" ;;
     socks://*|socks5://*) build_socks_outbound_json "$1" ;;
-    *) fail "unsupported connection URL. Use vless://, socks://, socks5:// or a subscription URL." ;;
+    *) fail "unsupported connection URL. Use vless://, hysteria2://, hy2://, socks:// or socks5://." ;;
   esac
 }
 
@@ -1128,13 +1589,15 @@ apply_url() {
 configure_direct_url() {
   input="$1"
   case "$input" in
-    vless://*|socks://*|socks5://*)
+    vless://*|hysteria2://*|hy2://*|socks://*|socks5://*)
       MODE="url"
       CURRENT_URL="$input"
       LAST_SOURCE="$(url_kind "$input")"
+      profile_add_loaded "$input" "" "console"
+      ACTIVE_PROFILE_ID="$PROFILE_RESULT_ID"
       ;;
     *)
-      fail "unsupported URL. Use vless://, socks://, socks5:// or a subscription URL."
+      fail "unsupported URL. Use vless://, hysteria2://, hy2://, socks://, socks5:// or a subscription URL."
       ;;
   esac
 }
@@ -1157,13 +1620,16 @@ configure_subscription() {
   SUBSCRIPTION_PICK="$pick"
   CURRENT_URL="$selected"
   LAST_SOURCE="subscription-import"
+  profile_add_loaded "$selected" "" "$sub_url"
+  ACTIVE_PROFILE_ID="$PROFILE_RESULT_ID"
   echo "Selected #${SUBSCRIPTION_PICK}: $(describe_url "$CURRENT_URL")"
 }
 
 configure_input() {
   load_state
   input="${1:-}"
-  [ -n "$input" ] || fail "usage: xray-manager set <vless://... | socks://... | https://...>"
+  validate_single_line "$input"
+  [ -n "$input" ] || fail "usage: xray-manager set <vless://... | hysteria2://... | socks://... | https://...>"
 
   case "$input" in
     http://*|https://*) configure_subscription "$input" ;;
@@ -1227,6 +1693,7 @@ cmd_set_local_socks() {
   LOCAL_SOCKS_PORT="${2:-$DEFAULT_LOCAL_SOCKS_PORT}"
   validate_port "$LOCAL_SOCKS_PORT"
   [ -n "$LOCAL_SOCKS_LISTEN" ] || fail "listen address is empty"
+  validate_single_line "$LOCAL_SOCKS_LISTEN"
   save_state
   echo "Local SOCKS listener saved: ${LOCAL_SOCKS_LISTEN}:${LOCAL_SOCKS_PORT}"
   echo "Run: xray-manager apply"
@@ -1283,6 +1750,11 @@ cmd_apply_loaded() {
 
   case "${MODE:-url}" in
     url)
+      if [ -n "${ACTIVE_PROFILE_ID:-}" ]; then
+        [ "$(profile_enabled_by_id "$ACTIVE_PROFILE_ID")" = "1" ] || fail "active profile is disabled"
+        next_url="$(profile_url_by_id "$ACTIVE_PROFILE_ID")"
+        next_source="profile-apply"
+      fi
       [ -n "$next_url" ] || fail "CURRENT_URL is empty"
       ;;
     subscription)
@@ -1330,8 +1802,11 @@ cmd_show() {
   echo "LAN_IFACE=${LAN_IFACE:-$DEFAULT_LAN_IFACE}"
   echo "TPROXY_PORT=${TPROXY_PORT:-$DEFAULT_TPROXY_PORT}"
   echo "BYPASS_MACS=${BYPASS_MACS:-}"
+  echo "BYPASS_MACS_DISABLED=${BYPASS_MACS_DISABLED:-}"
   echo "BYPASS_RULES=${BYPASS_RULES:-}"
+  echo "BYPASS_RULES_DISABLED=${BYPASS_RULES_DISABLED:-}"
   echo "LAST_SOURCE=${LAST_SOURCE:-}"
+  echo "ACTIVE_PROFILE_ID=${ACTIVE_PROFILE_ID:-}"
 }
 
 cmd_show_secret() {
@@ -1383,6 +1858,103 @@ cmd_doctor() {
   echo "OK"
 }
 
+api_print_profiles() {
+  first=1
+  while IFS='|' read -r profile_id profile_enabled profile_name_b64 profile_url_b64 profile_source_b64; do
+    [ -n "$profile_id" ] || continue
+    profile_url="$(b64_decode "$profile_url_b64")"
+    profile_name="$(b64_decode "$profile_name_b64")"
+    profile_source="$(b64_decode "$profile_source_b64")"
+    [ "$first" -eq 1 ] || printf ','
+    first=0
+    is_active=false
+    [ "$profile_id" = "${ACTIVE_PROFILE_ID:-}" ] && is_active=true
+    is_enabled=false
+    [ "$profile_enabled" = "1" ] && is_enabled=true
+    is_subscription=false
+    case "$profile_source" in http://*|https://*) is_subscription=true ;; esac
+    printf '{"id":"%s","name":"%s","kind":"%s","host":"%s","source":"%s","subscription":%s,"enabled":%s,"active":%s}' \
+      "$(json_escape "$profile_id")" "$(json_escape "$profile_name")" "$(json_escape "$(url_kind "$profile_url")")" \
+      "$(json_escape "$(url_host "$profile_url")")" "$(json_escape "$profile_source")" "$is_subscription" "$is_enabled" "$is_active"
+  done < "$LINKS_FILE"
+}
+
+api_print_subscriptions() {
+  tmp_sources="$(mktemp)"
+  while IFS='|' read -r _ _ _ _ source_b64; do
+    [ -n "$source_b64" ] || continue
+    source="$(b64_decode "$source_b64")"
+    case "$source" in http://*|https://*) printf '%s\n' "$source_b64" ;; esac
+  done < "$LINKS_FILE" | awk '!seen[$0]++' > "$tmp_sources"
+
+  first=1
+  while IFS= read -r source_b64; do
+    [ -n "$source_b64" ] || continue
+    source="$(b64_decode "$source_b64")"
+    count="$(awk -F '|' -v wanted="$source_b64" '$5 == wanted { count++ } END { print count + 0 }' "$LINKS_FILE")"
+    [ "$first" -eq 1 ] || printf ','
+    first=0
+    printf '{"url":"%s","name":"%s","count":%s}' \
+      "$(json_escape "$source")" "$(json_escape "$(url_host "$source")")" "$count"
+  done < "$tmp_sources"
+  rm -f "$tmp_sources"
+}
+
+api_print_bypass_items() {
+  active_list="$1"
+  disabled_list="$2"
+  first=1
+  for enabled_and_list in "1|$active_list" "0|$disabled_list"; do
+    enabled="${enabled_and_list%%|*}"
+    item_list="${enabled_and_list#*|}"
+    old_ifs="${IFS:- }"
+    IFS=','
+    for item in $item_list; do
+      [ -n "$item" ] || continue
+      [ "$first" -eq 1 ] || printf ','
+      first=0
+      enabled_json=false
+      [ "$enabled" = "1" ] && enabled_json=true
+      printf '{"value":"%s","enabled":%s}' "$(json_escape "$item")" "$enabled_json"
+    done
+    IFS="$old_ifs"
+  done
+}
+
+cmd_api_state() {
+  load_state
+  running=false
+  pidof xray >/dev/null 2>&1 && running=true
+  printf '{'
+  printf '"service":{"running":%s},' "$running"
+  printf '"current":{"summary":"%s","profileId":"%s"},' \
+    "$(json_escape "$(describe_url "${CURRENT_URL:-}")")" "$(json_escape "${ACTIVE_PROFILE_ID:-}")"
+  printf '"settings":{"lanIface":"%s","tproxyPort":%s,"localSocksListen":"%s","localSocksPort":%s},' \
+    "$(json_escape "${LAN_IFACE:-$DEFAULT_LAN_IFACE}")" "${TPROXY_PORT:-$DEFAULT_TPROXY_PORT}" \
+    "$(json_escape "${LOCAL_SOCKS_LISTEN:-$DEFAULT_LOCAL_SOCKS_LISTEN}")" "${LOCAL_SOCKS_PORT:-$DEFAULT_LOCAL_SOCKS_PORT}"
+  printf '"profiles":['
+  api_print_profiles
+  printf '],"subscriptions":['
+  api_print_subscriptions
+  printf '],"bypass":{"macs":['
+  api_print_bypass_items "${BYPASS_MACS:-}" "${BYPASS_MACS_DISABLED:-}"
+  printf '],"domains":['
+  api_print_bypass_items "${BYPASS_RULES:-}" "${BYPASS_RULES_DISABLED:-}"
+  printf ']}}\n'
+}
+
+cmd_migrate_state() {
+  load_state
+  [ -n "${CURRENT_URL:-}" ] || return 0
+  if profile_url_exists "$CURRENT_URL"; then
+    [ -n "${ACTIVE_PROFILE_ID:-}" ] || ACTIVE_PROFILE_ID="$(profile_id_for_url "$CURRENT_URL")"
+  else
+    profile_add_loaded "$CURRENT_URL" "" "migration"
+    ACTIVE_PROFILE_ID="$PROFILE_RESULT_ID"
+  fi
+  save_state
+}
+
 cmd_menu() {
   while :; do
     echo
@@ -1406,7 +1978,7 @@ cmd_menu() {
 
     case "$ans" in
       1)
-        printf "Enter vless://, socks:// or subscription URL: "
+        printf "Enter vless://, hysteria2://, socks:// or subscription URL: "
         read -r v
         cmd_use "$v"
         ;;
@@ -1479,8 +2051,18 @@ cmd_help() {
   cat <<'EOS'
 xray-manager commands:
   menu
-  use <vless://... | socks://... | https://subscription>  save and apply
-  set <vless://... | socks://... | https://subscription>  save only
+  use <vless://... | hysteria2://... | socks://... | https://subscription>  save and apply
+  set <vless://... | hysteria2://... | socks://... | https://subscription>  save only
+  add-link <url> [name]                                   add connection profile
+  import-links <https://subscription>                     import all nodes as profiles
+  refresh-links <https://subscription>                    refresh one profile subscription
+  refresh-all-links                                       refresh all profile subscriptions
+  list-links                                               list connection profiles
+  select-link <id>                                         select profile
+  use-link <id>                                            select profile and apply
+  enable-link <id> | disable-link <id>
+  del-link <id>
+  check-link <url>                                         validate link syntax
   import <https://subscription>                            list nodes and save selection
   list-nodes                                               list subscription nodes
   select-node [number]                                     choose subscription node
@@ -1497,9 +2079,11 @@ xray-manager commands:
   status
   on | off
   add-bypass-mac aa:bb:cc:dd:ee:ff
+  enable-bypass-mac <mac> | disable-bypass-mac <mac>
   del-bypass-mac aa:bb:cc:dd:ee:ff
   list-bypass-mac
   add-bypass-rule <domain-rule>
+  enable-bypass-rule <rule> | disable-bypass-rule <rule>
   del-bypass-rule <domain-rule>
   list-bypass-rules
 EOS
@@ -1511,6 +2095,17 @@ shift || true
 case "$cmd" in
   use) cmd_use "${1:-}" ;;
   set) cmd_set "${1:-}" ;;
+  add-link) cmd_add_link "${1:-}" "${2:-}" ;;
+  import-links) cmd_import_links "${1:-}" ;;
+  refresh-links) cmd_refresh_links "${1:-}" ;;
+  refresh-all-links) cmd_refresh_all_links ;;
+  list-links) cmd_list_links ;;
+  select-link) cmd_select_link "${1:-}" ;;
+  use-link) cmd_use_link "${1:-}" ;;
+  enable-link) cmd_set_link_enabled "${1:-}" 1 ;;
+  disable-link) cmd_set_link_enabled "${1:-}" 0 ;;
+  del-link) cmd_del_link "${1:-}" ;;
+  check-link) build_proxy_outbound_json "${1:-}" >/dev/null && echo "OK" ;;
   import) cmd_import "${1:-}" ;;
   list-nodes) cmd_list_nodes ;;
   select-node) cmd_select_node "${1:-}" ;;
@@ -1528,11 +2123,17 @@ case "$cmd" in
   test) cmd_test ;;
   doctor) cmd_doctor ;;
   add-bypass-mac) add_mac "${1:-}" ;;
+  enable-bypass-mac) cmd_set_bypass_mac "${1:-}" 1 ;;
+  disable-bypass-mac) cmd_set_bypass_mac "${1:-}" 0 ;;
   del-bypass-mac) del_mac "${1:-}" ;;
   list-bypass-mac) list_mac ;;
   add-bypass-rule) add_rule "${1:-}" ;;
+  enable-bypass-rule) cmd_set_bypass_rule "${1:-}" 1 ;;
+  disable-bypass-rule) cmd_set_bypass_rule "${1:-}" 0 ;;
   del-bypass-rule) del_rule "${1:-}" ;;
   list-bypass-rules) list_rules ;;
+  api-state) cmd_api_state ;;
+  migrate-state) cmd_migrate_state ;;
   menu) cmd_menu ;;
   help|-h|--help) cmd_help ;;
   *) fail "unknown command: $cmd. Run: xray-manager help" ;;
@@ -1540,6 +2141,288 @@ esac
 EOF
 
   chmod 0755 /usr/bin/xray-manager
+}
+
+write_web_ui() {
+  mkdir -p /www/xray-manager /www/cgi-bin
+
+  cat > /www/cgi-bin/xray-manager <<'EOF'
+#!/bin/sh
+
+MANAGER="/usr/bin/xray-manager"
+MAX_BODY=131072
+
+json_escape() {
+  printf '%s' "$1" | tr '\r\n\t' '   ' | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+url_decode() {
+  encoded="$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')"
+  printf '%b' "$encoded"
+}
+
+form_value() {
+  key="$1"
+  raw="$(printf '%s' "$BODY" | tr '&' '\n' | sed -n "s/^${key}=//p" | head -n 1)"
+  [ -n "$raw" ] && url_decode "$raw" || true
+}
+
+send_json() {
+  code="$1"
+  payload="$2"
+  printf 'Status: %s\r\n' "$code"
+  printf 'Content-Type: application/json; charset=utf-8\r\n'
+  printf 'Cache-Control: no-store\r\n\r\n'
+  printf '%s\n' "$payload"
+  exit 0
+}
+
+run_manager() {
+  LAST_OUTPUT="$($MANAGER "$@" 2>&1)"
+  LAST_CODE=$?
+}
+
+if [ "${REQUEST_METHOD:-GET}" = "GET" ]; then
+  printf 'Content-Type: application/json; charset=utf-8\r\n'
+  printf 'Cache-Control: no-store\r\n\r\n'
+  exec "$MANAGER" api-state
+fi
+
+[ "${REQUEST_METHOD:-}" = "POST" ] || send_json "405 Method Not Allowed" '{"ok":false,"error":"method not allowed"}'
+request_scheme="http"
+[ "${HTTPS:-off}" = "on" ] && request_scheme="https"
+expected_origin="${request_scheme}://${HTTP_HOST:-}"
+[ -n "${HTTP_ORIGIN:-}" ] && [ "$HTTP_ORIGIN" = "$expected_origin" ] || send_json "403 Forbidden" '{"ok":false,"error":"request origin rejected"}'
+CONTENT_LENGTH="${CONTENT_LENGTH:-0}"
+case "$CONTENT_LENGTH" in ''|*[!0-9]*) CONTENT_LENGTH=0 ;; esac
+[ "$CONTENT_LENGTH" -le "$MAX_BODY" ] || send_json "413 Payload Too Large" '{"ok":false,"error":"request is too large"}'
+BODY="$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)"
+action="$(form_value action)"
+
+case "$action" in
+  add_links)
+    links="$(form_value links)"
+    [ -n "$links" ] || send_json "400 Bad Request" '{"ok":false,"error":"Добавьте хотя бы одну ссылку"}'
+    tmp_links="$(mktemp)"
+    printf '%s\n' "$links" | tr -d '\r' > "$tmp_links"
+    total=0
+    errors=""
+    while IFS= read -r link; do
+      link="$(printf '%s' "$link" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+      [ -n "$link" ] || continue
+      case "$link" in
+        http://*|https://*) run_manager import-links "$link" ;;
+        *) run_manager add-link "$link" ;;
+      esac
+      if [ "$LAST_CODE" -eq 0 ]; then
+        total=$((total + 1))
+      else
+        errors="${errors}${LAST_OUTPUT}; "
+      fi
+    done < "$tmp_links"
+    rm -f "$tmp_links"
+    [ -z "$errors" ] || send_json "400 Bad Request" "{\"ok\":false,\"error\":\"$(json_escape "$errors")\"}"
+    send_json "200 OK" "{\"ok\":true,\"message\":\"Добавлено источников: ${total}\"}"
+    ;;
+  refresh_subscription)
+    run_manager refresh-links "$(form_value source)"
+    ;;
+  refresh_all_subscriptions)
+    run_manager refresh-all-links
+    ;;
+  select_profile)
+    run_manager use-link "$(form_value id)"
+    ;;
+  delete_profile)
+    run_manager del-link "$(form_value id)"
+    ;;
+  set_profile_enabled)
+    id="$(form_value id)"
+    enabled="$(form_value enabled)"
+    if [ "$enabled" = "1" ]; then run_manager enable-link "$id"; else run_manager disable-link "$id"; fi
+    ;;
+  add_bypass)
+    kind="$(form_value kind)"
+    value="$(form_value value)"
+    if [ "$kind" = "mac" ]; then run_manager add-bypass-mac "$value"; else run_manager add-bypass-rule "$value"; fi
+    ;;
+  delete_bypass)
+    kind="$(form_value kind)"
+    value="$(form_value value)"
+    if [ "$kind" = "mac" ]; then run_manager del-bypass-mac "$value"; else run_manager del-bypass-rule "$value"; fi
+    ;;
+  set_bypass_enabled)
+    kind="$(form_value kind)"
+    value="$(form_value value)"
+    enabled="$(form_value enabled)"
+    if [ "$kind" = "mac" ]; then
+      if [ "$enabled" = "1" ]; then run_manager enable-bypass-mac "$value"; else run_manager disable-bypass-mac "$value"; fi
+    else
+      if [ "$enabled" = "1" ]; then run_manager enable-bypass-rule "$value"; else run_manager disable-bypass-rule "$value"; fi
+    fi
+    ;;
+  apply)
+    run_manager apply
+    ;;
+  service)
+    requested="$(form_value enabled)"
+    if [ "$requested" = "1" ]; then run_manager on; else run_manager off; fi
+    ;;
+  save_settings)
+    run_manager set-lan-iface "$(form_value lan_iface)"
+    [ "$LAST_CODE" -eq 0 ] || true
+    first_output="$LAST_OUTPUT"
+    first_code="$LAST_CODE"
+    if [ "$first_code" -eq 0 ]; then
+      run_manager set-local-socks "$(form_value socks_listen)" "$(form_value socks_port)"
+    fi
+    [ "$first_code" -eq 0 ] || { LAST_CODE="$first_code"; LAST_OUTPUT="$first_output"; }
+    ;;
+  *)
+    send_json "400 Bad Request" '{"ok":false,"error":"unknown action"}'
+    ;;
+esac
+
+if [ "${LAST_CODE:-1}" -eq 0 ]; then
+  send_json "200 OK" "{\"ok\":true,\"message\":\"$(json_escape "${LAST_OUTPUT:-Готово}")\"}"
+fi
+send_json "400 Bad Request" "{\"ok\":false,\"error\":\"$(json_escape "${LAST_OUTPUT:-Ошибка}")\"}"
+EOF
+  chmod 0755 /www/cgi-bin/xray-manager
+
+  cat > /www/xray-manager/index.html <<'EOF'
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Xray Manager</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">X</div>
+        <div><strong>Xray Manager</strong><span>OpenWrt · TProxy</span></div>
+      </div>
+      <div class="status-wrap"><span id="statusDot" class="dot"></span><span id="serviceText">Проверка…</span><button id="serviceButton" class="button ghost small">—</button></div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div><p class="eyebrow">Активное подключение</p><h1 id="currentProfile">Не выбрано</h1><p id="currentSummary" class="muted">Добавьте ссылку или подписку</p></div>
+        <button id="applyButton" class="button primary">Применить конфигурацию</button>
+      </section>
+
+      <nav class="tabs" aria-label="Разделы">
+        <button class="tab active" data-tab="connections">Подключения</button>
+        <button class="tab" data-tab="bypass">Обход</button>
+        <button class="tab" data-tab="settings">Настройки</button>
+      </nav>
+
+      <section id="connections" class="panel active">
+        <div class="section-head"><div><h2>Подключения</h2><p>VLESS, XHTTP, REALITY, Hysteria2 и gRPC</p></div><div class="section-actions"><button id="refreshAllSubscriptions" class="button ghost" hidden>↻ Обновить подписки</button><button id="openAddDialog" class="button primary">+ Добавить</button></div></div>
+        <div id="profiles" class="list"></div>
+        <div id="profilesEmpty" class="empty" hidden><div class="empty-icon">↗</div><h3>Пока нет подключений</h3><p>Вставьте одну или несколько ссылок либо URL подписки.</p></div>
+      </section>
+
+      <section id="bypass" class="panel">
+        <div class="section-head"><div><h2>Обход прокси</h2><p>Отключённые правила сохраняются, но не попадают в конфигурацию</p></div></div>
+        <div class="split">
+          <div class="card">
+            <div class="card-title"><div><h3>Устройства</h3><p>По MAC-адресу</p></div><span id="macCount" class="counter">0</span></div>
+            <form class="inline-form" data-add-kind="mac"><input name="value" placeholder="aa:bb:cc:dd:ee:ff" autocomplete="off"><button class="button">Добавить</button></form>
+            <div id="macList" class="rule-list"></div>
+          </div>
+          <div class="card">
+            <div class="card-title"><div><h3>Домены</h3><p>Точные имена и суффиксы</p></div><span id="domainCount" class="counter">0</span></div>
+            <form class="inline-form" data-add-kind="domain"><input name="value" placeholder="domain:example.com или .example.com" autocomplete="off"><button class="button">Добавить</button></form>
+            <div id="domainList" class="rule-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="settings" class="panel">
+        <div class="section-head"><div><h2>Настройки сети</h2><p>Базовые параметры TProxy и локального SOCKS</p></div></div>
+        <form id="settingsForm" class="settings-grid card">
+          <label><span>LAN интерфейс</span><input name="lan_iface" required></label>
+          <label><span>TProxy порт</span><input name="tproxy_port" disabled><small>Меняется через консоль</small></label>
+          <label><span>SOCKS listen</span><input name="socks_listen" required></label>
+          <label><span>SOCKS порт</span><input name="socks_port" inputmode="numeric" required></label>
+          <div class="settings-actions"><button class="button primary">Сохранить</button></div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="addDialog">
+    <form method="dialog" class="dialog-card" id="addLinksForm">
+      <div class="dialog-head"><div><h2>Добавить подключения</h2><p>По одной ссылке на строку. URL подписки импортирует все ноды.</p></div><button value="cancel" formnovalidate class="icon-button" aria-label="Закрыть">×</button></div>
+      <textarea name="links" rows="9" placeholder="vless://...&#10;hysteria2://...&#10;https://example.com/subscription" required></textarea>
+      <div class="protocols"><span>VLESS</span><span>REALITY</span><span>XHTTP</span><span>gRPC</span><span>Hysteria2</span></div>
+      <div class="dialog-actions"><button value="cancel" formnovalidate class="button ghost">Отмена</button><button id="addLinksButton" value="default" class="button primary">Добавить</button></div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="./app.js"></script>
+</body>
+</html>
+EOF
+
+  cat > /www/xray-manager/style.css <<'EOF'
+:root{--bg:#0a0c10;--surface:#11151b;--surface-2:#171c24;--line:#252c36;--text:#f5f7fa;--muted:#8e99a8;--accent:#79f2c0;--accent-2:#48d6a0;--danger:#ff6b76;--shadow:0 18px 70px rgba(0,0,0,.35)}*{box-sizing:border-box}html{background:var(--bg)}body{margin:0;min-height:100vh;background:radial-gradient(circle at 72% -10%,rgba(121,242,192,.09),transparent 33%),var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}.shell{width:min(1120px,calc(100% - 32px));margin:auto}.topbar{height:76px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}.brand,.status-wrap,.card-title,.section-head,.section-actions,.subscription-head{display:flex;align-items:center}.brand{gap:12px}.brand strong{display:block;font-size:15px}.brand span{display:block;color:var(--muted);font-size:12px}.logo{display:grid;place-items:center;width:34px;height:34px;border:1px solid rgba(121,242,192,.4);border-radius:10px;color:var(--accent);font-weight:800;background:rgba(121,242,192,.07)}.status-wrap,.section-actions{gap:9px}.status-wrap{color:var(--muted)}.dot{width:8px;height:8px;border-radius:50%;background:#66707c}.dot.on{background:var(--accent);box-shadow:0 0 0 5px rgba(121,242,192,.09)}main{padding:42px 0 64px}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;padding:18px 0 36px}.eyebrow{text-transform:uppercase;letter-spacing:.14em;color:var(--accent);font-size:11px;font-weight:700;margin:0 0 9px}.hero h1{font-size:clamp(28px,5vw,48px);letter-spacing:-.04em;line-height:1.05;margin:0 0 9px;max-width:720px}.muted,.section-head p,.card-title p,.dialog-head p{color:var(--muted);margin:0}.tabs{display:flex;gap:24px;border-bottom:1px solid var(--line);margin-bottom:28px}.tab{appearance:none;border:0;border-bottom:2px solid transparent;background:none;color:var(--muted);padding:13px 2px;font:inherit;font-weight:600;cursor:pointer}.tab.active{color:var(--text);border-color:var(--accent)}.panel{display:none}.panel.active{display:block}.section-head{justify-content:space-between;gap:20px;margin-bottom:18px}.section-head h2,.dialog-head h2{font-size:20px;margin:0 0 2px}.button{appearance:none;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);color:var(--text);padding:10px 15px;font:inherit;font-weight:650;cursor:pointer;transition:.18s ease}.button:hover{border-color:#3c4654;transform:translateY(-1px)}.button:disabled{opacity:.5;cursor:wait}.button.primary{background:var(--accent);border-color:var(--accent);color:#082117}.button.primary:hover{background:var(--accent-2)}.button.ghost{background:transparent}.button.small{padding:6px 10px;font-size:12px}.list{display:grid;gap:22px}.subscription-group{display:grid;gap:10px}.subscription-head{justify-content:space-between;gap:16px;padding:0 4px}.subscription-title{min-width:0}.subscription-title h3{margin:0;font-size:14px}.subscription-title p{margin:1px 0 0;color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:720px}.subscription-nodes{display:grid;gap:10px}.group-count{color:var(--muted);font-size:12px;margin-left:6px}.profile{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;padding:17px 18px;background:linear-gradient(110deg,var(--surface),rgba(17,21,27,.72));border:1px solid var(--line);border-radius:14px}.profile.active{border-color:rgba(121,242,192,.48);box-shadow:inset 3px 0 var(--accent)}.profile.off{opacity:.58}.profile-main{display:flex;align-items:center;gap:14px;min-width:0}.protocol-icon{display:grid;place-items:center;flex:0 0 auto;width:42px;height:42px;border-radius:12px;background:#1d252d;color:var(--accent);font-weight:800;text-transform:uppercase}.profile h3{margin:0;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta{display:flex;gap:8px;align-items:center;color:var(--muted);font-size:12px}.badge{padding:2px 7px;border-radius:99px;background:rgba(121,242,192,.09);color:var(--accent);font-size:10px;text-transform:uppercase;letter-spacing:.08em}.profile-actions,.rule-actions{display:flex;align-items:center;gap:8px}.icon-button{appearance:none;border:0;background:transparent;color:var(--muted);font-size:22px;line-height:1;padding:6px;cursor:pointer}.icon-button.danger:hover{color:var(--danger)}.empty{text-align:center;padding:64px 20px;border:1px dashed var(--line);border-radius:16px;color:var(--muted)}.empty h3{color:var(--text);margin:12px 0 4px}.empty p{margin:0}.empty-icon{font-size:24px;color:var(--accent)}.split{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:20px}.card-title{justify-content:space-between;margin-bottom:16px}.card-title h3{margin:0;font-size:16px}.counter{display:grid;place-items:center;min-width:28px;height:28px;padding:0 8px;border-radius:99px;background:var(--surface-2);color:var(--muted)}.inline-form{display:flex;gap:8px;margin-bottom:15px}input,textarea{width:100%;border:1px solid var(--line);border-radius:10px;background:#0c1015;color:var(--text);padding:10px 12px;font:inherit;outline:0}input:focus,textarea:focus{border-color:rgba(121,242,192,.65);box-shadow:0 0 0 3px rgba(121,242,192,.07)}input:disabled{opacity:.48}.rule-list{display:grid;gap:6px}.rule{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:42px;padding:7px 8px 7px 11px;border-radius:9px;background:var(--surface-2)}.rule.off .rule-value{text-decoration:line-through;color:var(--muted)}.rule-value{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}.switch{position:relative;width:36px;height:21px;flex:0 0 auto}.switch input{position:absolute;opacity:0}.switch span{position:absolute;inset:0;border-radius:99px;background:#303844;cursor:pointer}.switch span:after{content:"";position:absolute;width:15px;height:15px;left:3px;top:3px;border-radius:50%;background:#9ca5b1;transition:.18s}.switch input:checked+span{background:rgba(121,242,192,.25)}.switch input:checked+span:after{transform:translateX(15px);background:var(--accent)}.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.settings-grid label span{display:block;font-weight:650;margin-bottom:7px}.settings-grid small{display:block;color:var(--muted);margin-top:5px}.settings-actions{grid-column:1/-1;display:flex;justify-content:flex-end}dialog{width:min(650px,calc(100% - 28px));padding:0;border:1px solid var(--line);border-radius:18px;background:var(--surface);color:var(--text);box-shadow:var(--shadow)}dialog::backdrop{background:rgba(3,5,8,.74);backdrop-filter:blur(5px)}.dialog-card{padding:24px}.dialog-head{display:flex;justify-content:space-between;gap:18px;margin-bottom:18px}.dialog-card textarea{resize:vertical;min-height:180px}.protocols{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}.protocols span{font-size:10px;color:var(--muted);border:1px solid var(--line);border-radius:99px;padding:3px 7px}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}.toast{position:fixed;right:24px;bottom:24px;max-width:min(420px,calc(100% - 48px));padding:12px 15px;border:1px solid var(--line);border-radius:11px;background:#1a2028;box-shadow:var(--shadow);opacity:0;transform:translateY(10px);pointer-events:none;transition:.2s}.toast.show{opacity:1;transform:none}.toast.error{border-color:rgba(255,107,118,.5);color:#ffb1b7}@media(max-width:760px){.shell{width:min(100% - 22px,1120px)}.topbar{height:66px}.status-wrap>#serviceText{display:none}main{padding-top:24px}.hero{align-items:flex-start;flex-direction:column}.hero .button{width:100%}.split,.settings-grid{grid-template-columns:1fr}.profile{grid-template-columns:1fr}.profile-actions{justify-content:flex-end}.section-head{align-items:flex-start}.section-actions{flex-wrap:wrap;justify-content:flex-end}.inline-form{flex-direction:column}.tabs{gap:16px;overflow:auto}}
+EOF
+
+  cat > /www/xray-manager/app.js <<'EOF'
+const api='/cgi-bin/xray-manager';
+const $=(s,r=document)=>r.querySelector(s);
+const $$=(s,r=document)=>[...r.querySelectorAll(s)];
+let state=null, busy=false, toastTimer;
+
+function escapeHtml(value=''){return String(value).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
+function toast(message,error=false){const el=$('#toast');el.textContent=message||'Готово';el.className='toast show'+(error?' error':'');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.className='toast',3600);}
+async function request(action,data={}){if(busy)return;busy=true;document.body.classList.add('busy');try{const body=new URLSearchParams({action,...data});const response=await fetch(api,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body});const result=await response.json();if(!result.ok)throw new Error(result.error||'Ошибка');toast(result.message);await load();return result;}catch(error){toast(error.message,true);throw error;}finally{busy=false;document.body.classList.remove('busy');}}
+async function load(){try{const response=await fetch(api,{cache:'no-store'});state=await response.json();render();}catch(error){toast('Не удалось получить состояние: '+error.message,true);}}
+
+function render(){
+  const running=state.service.running;$('#statusDot').classList.toggle('on',running);$('#serviceText').textContent=running?'Xray работает':'Xray остановлен';$('#serviceButton').textContent=running?'Остановить':'Запустить';$('#serviceButton').dataset.enabled=running?'0':'1';
+  const active=state.profiles.find(p=>p.active);$('#currentProfile').textContent=active?active.name:'Не выбрано';$('#currentSummary').textContent=state.current.summary||'Добавьте ссылку или подписку';
+  const subscriptions=state.subscriptions||[];const manual=state.profiles.filter(profile=>!profile.subscription);const groups=[];
+  if(manual.length)groups.push(renderProfileGroup('Добавленные вручную','Отдельные подключения',manual));
+  subscriptions.forEach(subscription=>{const profiles=state.profiles.filter(profile=>profile.source===subscription.url);if(profiles.length)groups.push(renderProfileGroup(subscription.name,'Подписка',profiles,subscription.url));});
+  const container=$('#profiles');container.innerHTML=groups.join('');
+  $('#refreshAllSubscriptions').hidden=subscriptions.length===0;
+  $('#profilesEmpty').hidden=state.profiles.length>0;
+  renderRules('mac',state.bypass.macs,$('#macList'));renderRules('domain',state.bypass.domains,$('#domainList'));$('#macCount').textContent=state.bypass.macs.length;$('#domainCount').textContent=state.bypass.domains.length;
+  const form=$('#settingsForm');form.lan_iface.value=state.settings.lanIface;form.tproxy_port.value=state.settings.tproxyPort;form.socks_listen.value=state.settings.localSocksListen;form.socks_port.value=state.settings.localSocksPort;
+}
+function renderProfile(profile){return `<article class="profile ${profile.active?'active':''} ${profile.enabled?'':'off'}"><div class="profile-main"><div class="protocol-icon">${escapeHtml(profile.kind.slice(0,2))}</div><div style="min-width:0"><h3>${escapeHtml(profile.name)}</h3><div class="meta"><span class="badge">${escapeHtml(profile.kind)}</span><span>${escapeHtml(profile.host)}</span>${profile.active?'<span>· активно</span>':''}</div></div></div><div class="profile-actions"><label class="switch" title="Включить профиль"><input type="checkbox" data-profile-toggle="${escapeHtml(profile.id)}" ${profile.enabled?'checked':''}><span></span></label><button class="button small" data-select="${escapeHtml(profile.id)}" ${!profile.enabled||profile.active?'disabled':''}>Выбрать</button><button class="icon-button danger" data-delete-profile="${escapeHtml(profile.id)}" title="Удалить">×</button></div></article>`;}
+function renderProfileGroup(title,subtitle,profiles,source=''){return `<section class="subscription-group"><div class="subscription-head"><div class="subscription-title"><h3>${escapeHtml(title)} <span class="group-count">${profiles.length}</span></h3><p title="${escapeHtml(subtitle)}">${escapeHtml(subtitle)}</p></div>${source?`<button class="button ghost small" data-refresh-subscription="${escapeHtml(source)}">↻ Обновить</button>`:''}</div><div class="subscription-nodes">${profiles.map(renderProfile).join('')}</div></section>`;}
+function renderRules(kind,items,container){container.innerHTML=items.length?items.map(item=>`<div class="rule ${item.enabled?'':'off'}"><span class="rule-value">${escapeHtml(item.value)}</span><span class="rule-actions"><label class="switch"><input type="checkbox" data-rule-toggle="${escapeHtml(kind)}" data-value="${escapeHtml(item.value)}" ${item.enabled?'checked':''}><span></span></label><button class="icon-button danger" data-rule-delete="${escapeHtml(kind)}" data-value="${escapeHtml(item.value)}" title="Удалить">×</button></span></div>`).join(''):'<div class="muted" style="padding:10px 2px">Список пуст</div>';}
+
+$$('.tab').forEach(tab=>tab.addEventListener('click',()=>{$$('.tab').forEach(x=>x.classList.toggle('active',x===tab));$$('.panel').forEach(panel=>panel.classList.toggle('active',panel.id===tab.dataset.tab));}));
+$('#openAddDialog').addEventListener('click',()=>$('#addDialog').showModal());
+$('#addLinksForm').addEventListener('submit',async event=>{if(event.submitter?.value==='cancel')return;event.preventDefault();const form=event.currentTarget;try{await request('add_links',{links:form.links.value});form.reset();$('#addDialog').close();}catch{}});
+$('#applyButton').addEventListener('click',()=>request('apply'));
+$('#serviceButton').addEventListener('click',event=>request('service',{enabled:event.currentTarget.dataset.enabled}));
+$('#refreshAllSubscriptions').addEventListener('click',()=>request('refresh_all_subscriptions'));
+$('#profiles').addEventListener('click',event=>{const select=event.target.closest('[data-select]');const del=event.target.closest('[data-delete-profile]');const refresh=event.target.closest('[data-refresh-subscription]');if(select)request('select_profile',{id:select.dataset.select});if(del&&confirm('Удалить это подключение?'))request('delete_profile',{id:del.dataset.deleteProfile});if(refresh)request('refresh_subscription',{source:refresh.dataset.refreshSubscription});});
+$('#profiles').addEventListener('change',event=>{const input=event.target.closest('[data-profile-toggle]');if(input)request('set_profile_enabled',{id:input.dataset.profileToggle,enabled:input.checked?'1':'0'}).catch(()=>load());});
+$$('[data-add-kind]').forEach(form=>form.addEventListener('submit',async event=>{event.preventDefault();const value=form.value.value.trim();if(!value)return;try{await request('add_bypass',{kind:form.dataset.addKind,value});form.reset();}catch{}}));
+$('#bypass').addEventListener('change',event=>{const input=event.target.closest('[data-rule-toggle]');if(input)request('set_bypass_enabled',{kind:input.dataset.ruleToggle,value:input.dataset.value,enabled:input.checked?'1':'0'}).catch(()=>load());});
+$('#bypass').addEventListener('click',event=>{const button=event.target.closest('[data-rule-delete]');if(button&&confirm('Удалить правило?'))request('delete_bypass',{kind:button.dataset.ruleDelete,value:button.dataset.value});});
+$('#settingsForm').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;await request('save_settings',{lan_iface:form.lan_iface.value,socks_listen:form.socks_listen.value,socks_port:form.socks_port.value});});
+load();
+EOF
+
+  touch /etc/httpd.conf
+  grep -qF '/xray-manager:root:$p$root' /etc/httpd.conf || echo '/xray-manager:root:$p$root' >> /etc/httpd.conf
+  grep -qF '/cgi-bin/xray-manager:root:$p$root' /etc/httpd.conf || echo '/cgi-bin/xray-manager:root:$p$root' >> /etc/httpd.conf
+  /etc/init.d/uhttpd enable
+  /etc/init.d/uhttpd restart
 }
 
 main() {
@@ -1550,6 +2433,8 @@ main() {
   install_xray_core
   write_init_scripts
   write_manager
+  /usr/bin/xray-manager migrate-state
+  write_web_ui
 
   /etc/init.d/xray enable
   /etc/init.d/xray-tproxy enable
@@ -1564,6 +2449,7 @@ main() {
   echo "  xray-manager use-socks"
   echo "  xray-manager select-node"
   echo "  xray-manager test"
+  echo "  Web UI: http://$(uci -q get network.lan.ipaddr || echo 192.168.1.1)/xray-manager/"
 }
 
 main "$@"

@@ -1,15 +1,18 @@
-# OpenWrt Xray TProxy (Manager Edition)
+# OpenWrt Xray TProxy (Web + CLI)
 
 Установка Xray + TProxy + менеджер конфигурации на OpenWrt одной командой.
 
 Что умеет:
 
-- VLESS/REALITY по ссылке
-- подписки с выбором ноды при импорте
+- веб-интерфейс для OpenWrt и прежний консольный менеджер
+- несколько подключений с быстрым переключением, как в Happ
+- VLESS с REALITY, XHTTP, gRPC и WebSocket
+- Hysteria2 (`hysteria2://` и `hy2://`)
+- подписки с импортом всех нод или выбором одной ноды из CLI
 - повторный выбор ноды без переустановки
 - SOCKS5 upstream, включая локальный `127.0.0.1:1080`
 - локальный SOCKS listener для тестов и приложений
-- bypass по MAC и доменным правилам
+- bypass по MAC и доменным правилам с добавлением, удалением и включением/выключением
 - проверка Xray/nft перед применением конфига
 - автоопределение архитектуры Xray
 
@@ -19,7 +22,7 @@
 
 - OpenWrt 22.03+ (fw4 / nftables)
 - архитектура устройства поддерживается Xray
-- VLESS желательно с REALITY
+- для входа в веб-интерфейс должен быть задан пароль `root` (`passwd`)
 
 ---
 
@@ -35,11 +38,47 @@ opkg update && opkg install ca-bundle ca-certificates uclient-fetch && uclient-f
 xray-manager
 ```
 
+Веб-интерфейс:
+
+```text
+http://192.168.1.1/xray-manager/
+```
+
+Используется встроенный `uhttpd`. Страница и CGI защищены root-паролем OpenWrt. Если пароль ещё не задан:
+
+```sh
+passwd
+/etc/init.d/uhttpd restart
+```
+
+---
+
+## Несколько подключений
+
+В веб-интерфейсе можно вставить сразу несколько ссылок — по одной на строку. Если вставить URL подписки, все поддерживаемые ноды будут добавлены отдельными профилями и сгруппированы по источнику. Каждую подписку можно обновить отдельно или обновить все сразу.
+
+То же из консоли:
+
+```sh
+xray-manager add-link 'vless://...'
+xray-manager add-link 'hysteria2://...'
+xray-manager import-links 'https://example.com/subscription'
+xray-manager refresh-links 'https://example.com/subscription'
+xray-manager refresh-all-links
+xray-manager list-links
+xray-manager use-link <id>
+xray-manager disable-link <id>
+xray-manager enable-link <id>
+xray-manager del-link <id>
+```
+
+Звёздочка в `list-links` отмечает активный профиль. `use-link` выбирает профиль и сразу применяет конфигурацию; `select-link` только сохраняет выбор.
+
 ---
 
 ## Быстрый старт
 
-### VLESS ссылка
+### VLESS / REALITY / XHTTP / gRPC
 
 Сохранить и сразу применить:
 
@@ -54,11 +93,24 @@ xray-manager set 'vless://...'
 xray-manager apply
 ```
 
+Транспорт определяется параметром ссылки `type`, в том числе `type=xhttp` и `type=grpc`. REALITY определяется через `security=reality` и стандартные параметры `pbk`, `sid`, `sni`, `fp`.
+
+### Hysteria2
+
+Поддерживаются обе распространённые схемы ссылки:
+
+```sh
+xray-manager use 'hysteria2://password@example.com:443/?sni=example.com'
+xray-manager use 'hy2://password@example.com:443/?sni=example.com'
+```
+
+Также разбираются `insecure`, `fp`, `pinSHA256` и Salamander obfs через `obfs=salamander&obfs-password=...`.
+
 ---
 
 ## Подписка с выбором подключения
 
-Импорт подписки показывает список доступных `vless://` и `socks://` подключений.
+Старый интерактивный импорт показывает список доступных VLESS, Hysteria2 и SOCKS подключений и сохраняет выбранную ноду.
 
 ```sh
 xray-manager use 'https://example.com/subscription'
@@ -173,6 +225,8 @@ xray-manager add-bypass-rule 'vk.com'
 xray-manager add-bypass-rule '.youtube.com'
 xray-manager add-bypass-rule 'domain:restream-media.net'
 xray-manager list-bypass-rules
+xray-manager disable-bypass-rule 'domain:restream-media.net'
+xray-manager enable-bypass-rule 'domain:restream-media.net'
 xray-manager del-bypass-rule 'vk.com'
 xray-manager apply
 ```
@@ -185,6 +239,8 @@ MAC bypass остаётся в `nftables`, потому что Xray routing не
 
 ```sh
 xray-manager add-bypass-mac aa:bb:cc:dd:ee:ff
+xray-manager disable-bypass-mac aa:bb:cc:dd:ee:ff
+xray-manager enable-bypass-mac aa:bb:cc:dd:ee:ff
 xray-manager del-bypass-mac aa:bb:cc:dd:ee:ff
 xray-manager list-bypass-mac
 xray-manager apply
@@ -223,6 +279,9 @@ xray-manager apply
 - `/etc/init.d/xray`
 - `/etc/init.d/xray-tproxy`
 - `/etc/xray-manager/config`
+- `/etc/xray-manager/links`
+- `/www/xray-manager/`
+- `/www/cgi-bin/xray-manager`
 
 ---
 
