@@ -20,9 +20,6 @@ DEFAULT_TPROXY_MARK="1"
 DEFAULT_TPROXY_TABLE="100"
 DEFAULT_LOCAL_SOCKS_LISTEN="127.0.0.1"
 DEFAULT_LOCAL_SOCKS_PORT="10818"
-DEFAULT_DNS_DOH_URL="https://dns.google/dns-query"
-DEFAULT_DNS_LISTEN_PORT="5053"
-DEFAULT_DNS_FAIL_MODE="strict"
 
 fail() {
   echo "Error: $*" >&2
@@ -66,10 +63,6 @@ TPROXY_MARK="${DEFAULT_TPROXY_MARK}"
 TPROXY_TABLE="${DEFAULT_TPROXY_TABLE}"
 LOCAL_SOCKS_LISTEN="${DEFAULT_LOCAL_SOCKS_LISTEN}"
 LOCAL_SOCKS_PORT="${DEFAULT_LOCAL_SOCKS_PORT}"
-DNS_TUNNEL_ENABLED="1"
-DNS_DOH_URL="${DEFAULT_DNS_DOH_URL}"
-DNS_LISTEN_PORT="${DEFAULT_DNS_LISTEN_PORT}"
-DNS_FAIL_MODE="${DEFAULT_DNS_FAIL_MODE}"
 DNS_PROXY_ENABLED="0"
 LAST_SOURCE=""
 ACTIVE_PROFILE_ID=""
@@ -94,22 +87,12 @@ EOF
   append_state_key TPROXY_TABLE "$DEFAULT_TPROXY_TABLE"
   append_state_key LOCAL_SOCKS_LISTEN "$DEFAULT_LOCAL_SOCKS_LISTEN"
   append_state_key LOCAL_SOCKS_PORT "$DEFAULT_LOCAL_SOCKS_PORT"
-  append_state_key DNS_TUNNEL_ENABLED "1"
-  append_state_key DNS_DOH_URL "$DEFAULT_DNS_DOH_URL"
-  append_state_key DNS_LISTEN_PORT "$DEFAULT_DNS_LISTEN_PORT"
-  append_state_key DNS_FAIL_MODE "$DEFAULT_DNS_FAIL_MODE"
   append_state_key DNS_PROXY_ENABLED "0"
   append_state_key LAST_SOURCE ""
   append_state_key ACTIVE_PROFILE_ID ""
   touch "$LINKS_FILE"
   chmod 0600 "$LINKS_FILE"
   chmod 0600 "$STATE_FILE"
-}
-
-install_packages() {
-  echo "Installing packages"
-  opkg update
-  opkg install kmod-nft-tproxy kmod-nf-tproxy unzip uclient-fetch ca-bundle ca-certificates openssl-util coreutils-base64 uhttpd https-dns-proxy
 }
 
 download_file() {
@@ -232,24 +215,7 @@ stop() {
 }
 EOF
 
-  cat > /etc/init.d/xray-dns-watchdog <<'EOF'
-#!/bin/sh /etc/rc.common
-
-START=100
-STOP=10
-USE_PROCD=1
-
-start_service() {
-  procd_open_instance
-  procd_set_param command /usr/bin/xray-manager dns-watch
-  procd_set_param respawn 3600 5 5
-  procd_set_param stdout 1
-  procd_set_param stderr 1
-  procd_close_instance
-}
-EOF
-
-  chmod 0755 /etc/init.d/xray /etc/init.d/xray-tproxy /etc/init.d/xray-dns-watchdog
+  chmod 0755 /etc/init.d/xray /etc/init.d/xray-tproxy
 }
 
 write_manager() {
@@ -271,12 +237,8 @@ DEFAULT_TPROXY_MARK="1"
 DEFAULT_TPROXY_TABLE="100"
 DEFAULT_LOCAL_SOCKS_LISTEN="127.0.0.1"
 DEFAULT_LOCAL_SOCKS_PORT="10818"
-DEFAULT_DNS_DOH_URL="https://dns.google/dns-query"
-DEFAULT_DNS_LISTEN_PORT="5053"
-DEFAULT_DNS_FAIL_MODE="strict"
-DNS_FALLBACK_FLAG="${BASE_DIR}/dns-fallback"
-DNS_DEGRADED_FLAG="/tmp/xray-manager-dns-degraded"
-DNS_DHCP_BACKUP="${BASE_DIR}/dhcp-before-doh.uci"
+DEFAULT_DNS_PROXY_PORT="1053"
+DNS_DHCP_BACKUP="${BASE_DIR}/dhcp-before-dns-proxy.uci"
 
 fail() {
   echo "Error: $*" >&2
@@ -340,16 +302,6 @@ validate_single_line() {
   [ "$cleaned" = "$value" ] || fail "value must be a single line"
 }
 
-validate_doh_url() {
-  value="${1:-}"
-  validate_single_line "$value"
-  case "$value" in
-    https://*) ;;
-    *) fail "DoH URL must start with https://" ;;
-  esac
-  printf '%s' "$value" | grep -Eq '^[A-Za-z0-9:/?&=._%+~-]+$' || fail "DoH URL contains unsupported characters"
-}
-
 json_string_or_empty() {
   printf '"%s"' "$(json_escape "${1:-}")"
 }
@@ -400,10 +352,6 @@ load_state() {
   : "${TPROXY_TABLE:=$DEFAULT_TPROXY_TABLE}"
   : "${LOCAL_SOCKS_LISTEN:=$DEFAULT_LOCAL_SOCKS_LISTEN}"
   : "${LOCAL_SOCKS_PORT:=$DEFAULT_LOCAL_SOCKS_PORT}"
-  : "${DNS_TUNNEL_ENABLED:=1}"
-  : "${DNS_DOH_URL:=$DEFAULT_DNS_DOH_URL}"
-  : "${DNS_LISTEN_PORT:=$DEFAULT_DNS_LISTEN_PORT}"
-  : "${DNS_FAIL_MODE:=$DEFAULT_DNS_FAIL_MODE}"
   : "${DNS_PROXY_ENABLED:=0}"
   : "${LAST_SOURCE:=}"
   : "${ACTIVE_PROFILE_ID:=}"
@@ -429,10 +377,6 @@ TPROXY_MARK="$(state_escape "${TPROXY_MARK:-$DEFAULT_TPROXY_MARK}")"
 TPROXY_TABLE="$(state_escape "${TPROXY_TABLE:-$DEFAULT_TPROXY_TABLE}")"
 LOCAL_SOCKS_LISTEN="$(state_escape "${LOCAL_SOCKS_LISTEN:-$DEFAULT_LOCAL_SOCKS_LISTEN}")"
 LOCAL_SOCKS_PORT="$(state_escape "${LOCAL_SOCKS_PORT:-$DEFAULT_LOCAL_SOCKS_PORT}")"
-DNS_TUNNEL_ENABLED="$(state_escape "${DNS_TUNNEL_ENABLED:-1}")"
-DNS_DOH_URL="$(state_escape "${DNS_DOH_URL:-$DEFAULT_DNS_DOH_URL}")"
-DNS_LISTEN_PORT="$(state_escape "${DNS_LISTEN_PORT:-$DEFAULT_DNS_LISTEN_PORT}")"
-DNS_FAIL_MODE="$(state_escape "${DNS_FAIL_MODE:-$DEFAULT_DNS_FAIL_MODE}")"
 DNS_PROXY_ENABLED="$(state_escape "${DNS_PROXY_ENABLED:-0}")"
 LAST_SOURCE="$(state_escape "${LAST_SOURCE:-}")"
 ACTIVE_PROFILE_ID="$(state_escape "${ACTIVE_PROFILE_ID:-}")"
@@ -1601,6 +1545,34 @@ write_config_files() {
   build_routing_direct_rule_json
 
   LOCAL_SOCKS_LISTEN_ESC="$(json_escape "$LOCAL_SOCKS_LISTEN")"
+  DNS_INBOUND_JSON=""
+  ROUTING_RULES_OUTPUT="$ROUTING_DIRECT_RULE_JSON"
+  if [ "${DNS_PROXY_ENABLED:-0}" = "1" ]; then
+    DNS_UPSTREAM_ESC="$(json_escape "$(dns_router_upstream)")"
+    DNS_INBOUND_JSON=",
+    {
+      \"tag\": \"dns-proxy\",
+      \"listen\": \"127.0.0.1\",
+      \"port\": ${DEFAULT_DNS_PROXY_PORT},
+      \"protocol\": \"dokodemo-door\",
+      \"settings\": {
+        \"address\": \"${DNS_UPSTREAM_ESC}\",
+        \"port\": 53,
+        \"network\": \"tcp,udp\"
+      }
+    }"
+    DNS_ROUTING_RULE_JSON="      {
+        \"inboundTag\": [\"dns-proxy\"],
+        \"outboundTag\": \"proxy\",
+        \"type\": \"field\"
+      }"
+    if [ -n "$ROUTING_RULES_OUTPUT" ]; then
+      ROUTING_RULES_OUTPUT="${DNS_ROUTING_RULE_JSON},
+${ROUTING_RULES_OUTPUT}"
+    else
+      ROUTING_RULES_OUTPUT="$DNS_ROUTING_RULE_JSON"
+    fi
+  fi
 
   cat > "$out_config" <<EOS
 {
@@ -1637,7 +1609,7 @@ write_config_files() {
           "tproxy": "tproxy"
         }
       }
-    }
+    }${DNS_INBOUND_JSON}
   ],
   "outbounds": [
 ${PROXY_OUTBOUND_JSON},
@@ -1653,7 +1625,7 @@ ${PROXY_OUTBOUND_JSON},
   "routing": {
     "domainStrategy": "IpIfNonMatch",
     "rules": [
-${ROUTING_DIRECT_RULE_JSON}
+${ROUTING_RULES_OUTPUT}
     ]
   }
 }
@@ -1701,9 +1673,6 @@ restart_services() {
   /etc/init.d/xray stop 2>/dev/null || true
   /etc/init.d/xray start || fail "failed to start xray"
   /etc/init.d/xray-tproxy start || fail "failed to start xray-tproxy"
-  if [ "${DNS_TUNNEL_ENABLED:-0}" = "1" ] && [ ! -f "$DNS_FALLBACK_FLAG" ]; then
-    dns_start_proxy || warn "failed to restart https-dns-proxy"
-  fi
 }
 
 apply_url() {
@@ -1838,108 +1807,80 @@ cmd_set_local_socks() {
   echo "Run: xray-manager apply"
 }
 
-dns_proxy_host() {
-  case "${LOCAL_SOCKS_LISTEN:-$DEFAULT_LOCAL_SOCKS_LISTEN}" in
-    0.0.0.0|::|::0) echo "127.0.0.1" ;;
-    *) echo "${LOCAL_SOCKS_LISTEN:-$DEFAULT_LOCAL_SOCKS_LISTEN}" ;;
-  esac
-}
-
 dns_backup_dhcp() {
   [ -s "$DNS_DHCP_BACKUP" ] && return 0
-  if [ -s /root/dhcp-before-doh.txt ]; then
-    cp /root/dhcp-before-doh.txt "$DNS_DHCP_BACKUP"
-  else
-    umask 077
-    uci export dhcp > "$DNS_DHCP_BACKUP"
-  fi
+  umask 077
+  uci export dhcp > "$DNS_DHCP_BACKUP"
   chmod 0600 "$DNS_DHCP_BACKUP"
 }
 
-dns_switch_dnsmasq_to_doh() {
+dns_router_upstream() {
+  for resolv_file in /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf.auto /etc/resolv.conf; do
+    [ -s "$resolv_file" ] || continue
+    upstream="$(awk '$1 == "nameserver" && $2 !~ /^127\./ && $2 != "::1" { print $2; exit }' "$resolv_file")"
+    if [ -n "$upstream" ]; then
+      printf '%s\n' "$upstream"
+      return 0
+    fi
+  done
+
+  for upstream in $(uci -q get network.wan.dns 2>/dev/null || true); do
+    case "$upstream" in 127.*|::1|'') continue ;; esac
+    printf '%s\n' "$upstream"
+    return 0
+  done
+  fail "router DNS server was not found"
+}
+
+dns_switch_to_proxy() {
   dns_backup_dhcp
   uci set 'dhcp.@dnsmasq[0].noresolv=1'
   uci -q delete 'dhcp.@dnsmasq[0].server' || true
-  uci add_list "dhcp.@dnsmasq[0].server=127.0.0.1#${DNS_LISTEN_PORT}"
+  uci add_list "dhcp.@dnsmasq[0].server=127.0.0.1#${DEFAULT_DNS_PROXY_PORT}"
   uci commit dhcp
   /etc/init.d/dnsmasq restart >/dev/null 2>&1
 }
 
-dns_restore_wan_runtime() {
-  /etc/init.d/https-dns-proxy stop >/dev/null 2>&1 || true
-  /etc/init.d/https-dns-proxy disable >/dev/null 2>&1 || true
+dns_remove_managed_servers() {
+  for managed_server in \
+    "127.0.0.1#${DEFAULT_DNS_PROXY_PORT}" \
+    "127.0.0.1#5053" \
+    "127.0.0.1#5054" \
+    "/mask.icloud.com/" \
+    "/mask-h2.icloud.com/" \
+    "/use-application-dns.net/"; do
+    uci -q del_list "dhcp.@dnsmasq[0].server=${managed_server}" || true
+  done
+}
+
+dns_restore_router() {
   if [ -s "$DNS_DHCP_BACKUP" ]; then
     uci import dhcp < "$DNS_DHCP_BACKUP"
+    rm -f "$DNS_DHCP_BACKUP"
   else
-    uci -q delete 'dhcp.@dnsmasq[0].noresolv' || true
-    uci -q delete 'dhcp.@dnsmasq[0].server' || true
-    uci set 'dhcp.@dnsmasq[0].resolvfile=/tmp/resolv.conf.d/resolv.conf.auto'
+    dns_remove_managed_servers
+    remaining_servers="$(uci -q get 'dhcp.@dnsmasq[0].server' 2>/dev/null || true)"
+    if [ -z "$remaining_servers" ]; then
+      uci -q delete 'dhcp.@dnsmasq[0].noresolv' || true
+      uci set 'dhcp.@dnsmasq[0].resolvfile=/tmp/resolv.conf.d/resolv.conf.auto'
+    fi
   fi
   uci commit dhcp
   /etc/init.d/dnsmasq restart >/dev/null 2>&1
 }
 
-dns_write_proxy_config() {
-  validate_port "${DNS_LISTEN_PORT:-$DEFAULT_DNS_LISTEN_PORT}"
-  validate_doh_url "${DNS_DOH_URL:-$DEFAULT_DNS_DOH_URL}"
-  proxy_option=""
-  case "${DNS_PROXY_ENABLED:-0}" in
-    0) ;;
-    1)
-      proxy_host="$(dns_proxy_host)"
-      printf '%s' "$proxy_host" | grep -Eq '^[A-Za-z0-9_.:-]+$' || fail "invalid local SOCKS host for DNS: $proxy_host"
-      validate_port "${LOCAL_SOCKS_PORT:-$DEFAULT_LOCAL_SOCKS_PORT}"
-      case "$proxy_host" in *:*) proxy_uri_host="[${proxy_host}]" ;; *) proxy_uri_host="$proxy_host" ;; esac
-      proxy_option="  option proxy_server 'socks5h://${proxy_uri_host}:${LOCAL_SOCKS_PORT}'"
-      ;;
-    *) fail "DNS proxy enabled must be 0 or 1" ;;
-  esac
-  tmp_dns_config="$(mktemp)"
-  cat > "$tmp_dns_config" <<EOS
-config main 'config'
-  option dnsmasq_config_update '-'
-  option force_dns '0'
-  option notrack_dns '0'
-  option canary_domains_icloud '1'
-  option canary_domains_mozilla '1'
-${proxy_option}
-  option force_ip_family 'ipv4'
-  option heartbeat_domain '-'
-
-config https-dns-proxy 'dns'
-  option resolver_url '${DNS_DOH_URL}'
-  option bootstrap_dns '8.8.8.8,8.8.4.4'
-  option listen_addr '127.0.0.1'
-  option listen_port '${DNS_LISTEN_PORT}'
-EOS
-  mv "$tmp_dns_config" /etc/config/https-dns-proxy
-  chmod 0600 /etc/config/https-dns-proxy
-}
-
-dns_start_proxy() {
-  [ -x /etc/init.d/https-dns-proxy ] || return 1
-  /etc/init.d/https-dns-proxy stop >/dev/null 2>&1 || true
-  dns_write_proxy_config
-  /etc/init.d/https-dns-proxy enable >/dev/null 2>&1
-  /etc/init.d/https-dns-proxy start >/dev/null 2>&1
-}
-
-dns_probe_doh() {
-  if [ "${DNS_PROXY_ENABLED:-0}" = "1" ]; then
-    pidof xray >/dev/null 2>&1 || return 1
-  fi
-  pidof https-dns-proxy >/dev/null 2>&1 || return 1
-
+dns_probe_proxy() {
+  pidof xray >/dev/null 2>&1 || return 1
   if command -v nslookup >/dev/null 2>&1; then
-    nslookup www.youtube.com "127.0.0.1:${DNS_LISTEN_PORT:-$DEFAULT_DNS_LISTEN_PORT}" >/dev/null 2>&1 || \
-      nslookup www.youtube.com "127.0.0.1#${DNS_LISTEN_PORT:-$DEFAULT_DNS_LISTEN_PORT}" >/dev/null 2>&1
+    nslookup www.youtube.com "127.0.0.1:${DEFAULT_DNS_PROXY_PORT}" >/dev/null 2>&1 || \
+      nslookup www.youtube.com "127.0.0.1#${DEFAULT_DNS_PROXY_PORT}" >/dev/null 2>&1
     return
   fi
 
   if command -v nc >/dev/null 2>&1 && nc -h 2>&1 | grep -q -- '-u'; then
     response_bytes="$({
       printf '\130\115\001\000\000\001\000\000\000\000\000\000\003www\007youtube\003com\000\000\001\000\001' |
-        nc -u -w 6 127.0.0.1 "${DNS_LISTEN_PORT:-$DEFAULT_DNS_LISTEN_PORT}" 2>/dev/null
+        nc -u -w 6 127.0.0.1 "$DEFAULT_DNS_PROXY_PORT" 2>/dev/null
     } | wc -c | tr -d ' ')"
     [ "${response_bytes:-0}" -ge 12 ] 2>/dev/null
     return
@@ -1948,250 +1889,36 @@ dns_probe_doh() {
   return 1
 }
 
-dns_watchdog_start() {
-  /etc/init.d/xray-dns-watchdog enable >/dev/null 2>&1
-  /etc/init.d/xray-dns-watchdog restart >/dev/null 2>&1
-}
-
-dns_watchdog_stop() {
-  /etc/init.d/xray-dns-watchdog stop >/dev/null 2>&1 || true
-  /etc/init.d/xray-dns-watchdog disable >/dev/null 2>&1 || true
-}
-
-dns_restore_previous_mode() {
-  DNS_TUNNEL_ENABLED="$previous_enabled"
-  DNS_DOH_URL="$previous_url"
-  DNS_LISTEN_PORT="$previous_port"
-  DNS_FAIL_MODE="$previous_fail_mode"
-  DNS_PROXY_ENABLED="$previous_proxy_enabled"
-
-  if [ "$previous_enabled" = "1" ]; then
-    if dns_start_proxy; then
-      sleep 2
-      if [ "$previous_fail_mode" = "strict" ]; then
-        dns_switch_dnsmasq_to_doh || true
-      elif dns_probe_doh; then
-        dns_switch_dnsmasq_to_doh || true
-      else
-        touch "$DNS_FALLBACK_FLAG" "$DNS_DEGRADED_FLAG"
-        dns_restore_wan_runtime
-      fi
-    elif [ "$previous_fail_mode" = "strict" ]; then
-      touch "$DNS_DEGRADED_FLAG"
-      dns_switch_dnsmasq_to_doh || true
-    else
-      touch "$DNS_FALLBACK_FLAG" "$DNS_DEGRADED_FLAG"
-      dns_restore_wan_runtime
-    fi
-    dns_watchdog_start
-  else
-    /etc/init.d/https-dns-proxy stop >/dev/null 2>&1 || true
-    /etc/init.d/https-dns-proxy disable >/dev/null 2>&1 || true
-    if [ -s "$DNS_DHCP_BACKUP" ]; then
-      dns_restore_wan_runtime
-      rm -f "$DNS_DHCP_BACKUP"
-    fi
-  fi
-  save_state
-}
-
-cmd_set_dns() {
+cmd_set_dns_proxy() {
   load_state
-  previous_enabled="${DNS_TUNNEL_ENABLED:-0}"
-  previous_url="${DNS_DOH_URL:-$DEFAULT_DNS_DOH_URL}"
-  previous_port="${DNS_LISTEN_PORT:-$DEFAULT_DNS_LISTEN_PORT}"
-  previous_fail_mode="${DNS_FAIL_MODE:-$DEFAULT_DNS_FAIL_MODE}"
-  previous_proxy_enabled="${DNS_PROXY_ENABLED:-0}"
-  requested_enabled="${1:-0}"
-  requested_url="${2:-$previous_url}"
-  requested_port="${3:-$previous_port}"
-  requested_fail_mode="${4:-$previous_fail_mode}"
-  requested_proxy_enabled="${5:-$previous_proxy_enabled}"
+  requested="${1:-0}"
+  case "$requested" in 0|1) ;; *) fail "DNS proxy must be 0 or 1" ;; esac
 
-  case "$requested_enabled" in 0|1) ;; *) fail "DNS enabled must be 0 or 1" ;; esac
-  validate_doh_url "$requested_url"
-  validate_port "$requested_port"
-  case "$requested_fail_mode" in strict|fallback) ;; *) fail "DNS fail mode must be strict or fallback" ;; esac
-  case "$requested_proxy_enabled" in 0|1) ;; *) fail "DNS proxy enabled must be 0 or 1" ;; esac
-  if [ "$requested_enabled" = "1" ]; then
-    [ -x /usr/sbin/https-dns-proxy ] || fail "https-dns-proxy is not installed; run: opkg update && opkg install https-dns-proxy"
-  fi
-
-  if [ "$requested_enabled" != "1" ]; then
-    DNS_TUNNEL_ENABLED="0"
-    DNS_DOH_URL="$requested_url"
-    DNS_LISTEN_PORT="$requested_port"
-    DNS_FAIL_MODE="$requested_fail_mode"
-    DNS_PROXY_ENABLED="$requested_proxy_enabled"
+  if [ "$requested" = "0" ]; then
+    dns_restore_router
+    DNS_PROXY_ENABLED="0"
     save_state
-    dns_watchdog_stop
-    rm -f "$DNS_FALLBACK_FLAG" "$DNS_DEGRADED_FLAG"
-    dns_restore_wan_runtime
-    rm -f "$DNS_DHCP_BACKUP"
-    echo "DoH disabled; dnsmasq uses WAN resolvers"
+    if [ -n "${CURRENT_URL:-}" ]; then cmd_apply_loaded; fi
+    echo "DNS uses the router directly"
     return 0
   fi
 
-  dns_watchdog_stop
-  if [ "$previous_enabled" = "1" ]; then
-    dns_restore_wan_runtime
-  fi
-
-  DNS_TUNNEL_ENABLED="1"
-  DNS_DOH_URL="$requested_url"
-  DNS_LISTEN_PORT="$requested_port"
-  DNS_FAIL_MODE="$requested_fail_mode"
-  DNS_PROXY_ENABLED="$requested_proxy_enabled"
-
-  if ! dns_start_proxy; then
-    dns_restore_previous_mode
-    echo "Error: failed to start https-dns-proxy; previous DNS settings were restored" >&2
-    return 1
-  fi
-  sleep 2
-
-  if ! dns_probe_doh; then
-    /etc/init.d/https-dns-proxy stop >/dev/null 2>&1 || true
-    /etc/init.d/https-dns-proxy disable >/dev/null 2>&1 || true
-    dns_restore_previous_mode
-    touch "$DNS_DEGRADED_FLAG"
-    echo "Error: DoH on 127.0.0.1:${requested_port} did not answer; dnsmasq was not switched" >&2
-    return 1
-  fi
-
-  if ! dns_switch_dnsmasq_to_doh; then
-    /etc/init.d/https-dns-proxy stop >/dev/null 2>&1 || true
-    dns_restore_previous_mode
-    echo "Error: failed to switch dnsmasq to local DoH; previous DNS settings were restored" >&2
-    return 1
-  fi
-
+  [ -n "${CURRENT_URL:-}" ] || fail "select and apply a proxy profile first"
+  dns_router_upstream >/dev/null
+  dns_backup_dhcp
+  DNS_PROXY_ENABLED="1"
   save_state
-  rm -f "$DNS_FALLBACK_FLAG" "$DNS_DEGRADED_FLAG"
-  dns_watchdog_start
-  if [ "$DNS_PROXY_ENABLED" = "1" ]; then
-    echo "DoH enabled through Xray: dnsmasq -> ${DNS_DOH_URL} -> socks5h://$(dns_proxy_host):${LOCAL_SOCKS_PORT}"
-  else
-    echo "Direct DoH enabled: dnsmasq -> ${DNS_DOH_URL}"
+  cmd_apply_loaded
+  sleep 1
+  if ! dns_probe_proxy; then
+    DNS_PROXY_ENABLED="0"
+    save_state
+    cmd_apply_loaded || true
+    dns_restore_router
+    fail "DNS through the active proxy did not answer"
   fi
-}
-
-cmd_dns_test() {
-  load_state
-  [ "${DNS_TUNNEL_ENABLED:-0}" = "1" ] || fail "DoH is disabled"
-  if [ "${DNS_PROXY_ENABLED:-0}" = "1" ]; then
-    echo "Testing ${DNS_DOH_URL} via Xray SOCKS..."
-  else
-    echo "Testing ${DNS_DOH_URL} directly..."
-  fi
-  if ! dns_probe_doh; then
-    touch "$DNS_DEGRADED_FLAG"
-    fail "DoH did not answer"
-  fi
-  rm -f "$DNS_DEGRADED_FLAG"
-  echo "OK"
-}
-
-cmd_dns_watch() {
-  failures=0
-  while :; do
-    load_state
-    [ "${DNS_TUNNEL_ENABLED:-0}" = "1" ] || exit 0
-
-    if [ "${DNS_FAIL_MODE:-strict}" = "strict" ]; then
-      if ! pidof https-dns-proxy >/dev/null 2>&1; then
-        dns_start_proxy || true
-        sleep 3
-      fi
-      if dns_probe_doh; then
-        if [ -f "$DNS_DEGRADED_FLAG" ]; then
-          rm -f "$DNS_DEGRADED_FLAG"
-          logger -t xray-manager "DoH recovered"
-        fi
-        failures=0
-      else
-        failures=$((failures + 1))
-        if [ "$failures" -ge 2 ]; then
-          touch "$DNS_DEGRADED_FLAG"
-          logger -t xray-manager "DoH failed; strict mode keeps WAN DNS closed"
-          failures=0
-        fi
-      fi
-      sleep 15
-      continue
-    fi
-
-    if [ -f "$DNS_FALLBACK_FLAG" ]; then
-      if dns_start_proxy; then
-        sleep 3
-        if dns_probe_doh; then
-          if dns_switch_dnsmasq_to_doh; then
-            rm -f "$DNS_FALLBACK_FLAG" "$DNS_DEGRADED_FLAG"
-            failures=0
-            logger -t xray-manager "DoH recovered; WAN DNS fallback disabled"
-            sleep 15
-            continue
-          fi
-        fi
-      fi
-      touch "$DNS_FALLBACK_FLAG"
-      touch "$DNS_DEGRADED_FLAG"
-      dns_restore_wan_runtime
-      sleep 45
-      continue
-    fi
-
-    if ! pidof https-dns-proxy >/dev/null 2>&1; then
-      dns_start_proxy || true
-      sleep 3
-    fi
-
-    if dns_probe_doh; then
-      rm -f "$DNS_DEGRADED_FLAG"
-      failures=0
-    else
-      failures=$((failures + 1))
-      if [ "$failures" -ge 2 ]; then
-        touch "$DNS_FALLBACK_FLAG"
-        touch "$DNS_DEGRADED_FLAG"
-        dns_restore_wan_runtime
-        logger -t xray-manager "DoH failed; restored WAN DNS fallback"
-        failures=0
-      fi
-    fi
-    sleep 15
-  done
-}
-
-cmd_migrate_dns_state() {
-  load_state
-  [ "${DNS_TUNNEL_ENABLED:-0}" = "0" ] || return 0
-  current_port="$(uci -q get https-dns-proxy.dns.listen_port 2>/dev/null || true)"
-  [ -n "$current_port" ] || current_port="$DEFAULT_DNS_LISTEN_PORT"
-  current_dnsmasq_servers="$(uci -q get 'dhcp.@dnsmasq[0].server' 2>/dev/null || true)"
-  case " $current_dnsmasq_servers " in *" 127.0.0.1#${current_port} "*) ;; *) return 0 ;; esac
-  current_proxy="$(uci -q get https-dns-proxy.config.proxy_server 2>/dev/null || true)"
-  current_url="$(uci -q get https-dns-proxy.dns.resolver_url 2>/dev/null || true)"
-  DNS_TUNNEL_ENABLED="1"
-  case "$current_proxy" in socks5h://*|socks5://*) DNS_PROXY_ENABLED="1" ;; *) DNS_PROXY_ENABLED="0" ;; esac
-  case "$current_url" in https://*) DNS_DOH_URL="$current_url" ;; esac
-  if is_number "$current_port" && [ "$current_port" -ge 1 ] 2>/dev/null && [ "$current_port" -le 65535 ] 2>/dev/null; then DNS_LISTEN_PORT="$current_port"; fi
-  DNS_FAIL_MODE="strict"
-  if [ ! -s "$DNS_DHCP_BACKUP" ] && [ -s /root/dhcp-before-doh.txt ]; then
-    cp /root/dhcp-before-doh.txt "$DNS_DHCP_BACKUP"
-    chmod 0600 "$DNS_DHCP_BACKUP"
-  fi
-  save_state
-}
-
-cmd_apply_dns_state() {
-  load_state
-  saved_enabled="${DNS_TUNNEL_ENABLED:-0}"
-  saved_url="${DNS_DOH_URL:-$DEFAULT_DNS_DOH_URL}"
-  saved_port="${DNS_LISTEN_PORT:-$DEFAULT_DNS_LISTEN_PORT}"
-  saved_fail_mode="${DNS_FAIL_MODE:-$DEFAULT_DNS_FAIL_MODE}"
-  saved_proxy_enabled="${DNS_PROXY_ENABLED:-0}"
-  cmd_set_dns "$saved_enabled" "$saved_url" "$saved_port" "$saved_fail_mode" "$saved_proxy_enabled"
+  dns_switch_to_proxy
+  echo "DNS is sent through Xray; resolver: $(dns_router_upstream)"
 }
 
 cmd_set_lan_iface() {
@@ -2294,10 +2021,6 @@ cmd_show() {
   echo "SUBSCRIPTION_URL=${SUBSCRIPTION_URL:-}"
   echo "SUBSCRIPTION_PICK=${SUBSCRIPTION_PICK:-1}"
   echo "LOCAL_SOCKS=${LOCAL_SOCKS_LISTEN:-$DEFAULT_LOCAL_SOCKS_LISTEN}:${LOCAL_SOCKS_PORT:-$DEFAULT_LOCAL_SOCKS_PORT}"
-  echo "DNS_TUNNEL_ENABLED=${DNS_TUNNEL_ENABLED:-0}"
-  echo "DNS_DOH_URL=${DNS_DOH_URL:-$DEFAULT_DNS_DOH_URL}"
-  echo "DNS_LISTEN_PORT=${DNS_LISTEN_PORT:-$DEFAULT_DNS_LISTEN_PORT}"
-  echo "DNS_FAIL_MODE=${DNS_FAIL_MODE:-$DEFAULT_DNS_FAIL_MODE}"
   echo "DNS_PROXY_ENABLED=${DNS_PROXY_ENABLED:-0}"
   echo "LAN_IFACE=${LAN_IFACE:-$DEFAULT_LAN_IFACE}"
   echo "TPROXY_PORT=${TPROXY_PORT:-$DEFAULT_TPROXY_PORT}"
@@ -2326,20 +2049,10 @@ cmd_on() {
   load_state
   /etc/init.d/xray start
   /etc/init.d/xray-tproxy start
-  if [ "${DNS_TUNNEL_ENABLED:-0}" = "1" ]; then
-    dns_start_proxy || warn "failed to start DoH"
-    dns_watchdog_start
-  fi
 }
 
 cmd_off() {
   load_state
-  if [ "${DNS_TUNNEL_ENABLED:-0}" = "1" ] && [ "${DNS_PROXY_ENABLED:-0}" = "1" ] && [ "${DNS_FAIL_MODE:-strict}" = "fallback" ]; then
-    dns_watchdog_stop
-    touch "$DNS_FALLBACK_FLAG"
-    touch "$DNS_DEGRADED_FLAG"
-    dns_restore_wan_runtime
-  fi
   /etc/init.d/xray-tproxy stop
   /etc/init.d/xray stop
 }
@@ -2367,12 +2080,8 @@ cmd_doctor() {
   [ -f "$NFT_RULES" ] || fail "$NFT_RULES is missing"
   validate_config_file "$XRAY_CONFIG"
   validate_nft_file "$NFT_RULES"
-  if [ "${DNS_TUNNEL_ENABLED:-0}" = "1" ]; then
-    [ -x /usr/sbin/https-dns-proxy ] || fail "/usr/sbin/https-dns-proxy is missing"
-    [ -f /etc/config/https-dns-proxy ] || fail "/etc/config/https-dns-proxy is missing"
-    if [ "${DNS_FAIL_MODE:-strict}" = "strict" ]; then
-      dns_probe_doh || fail "DoH does not answer"
-    fi
+  if [ "${DNS_PROXY_ENABLED:-0}" = "1" ]; then
+    dns_probe_proxy || fail "DNS through Xray does not answer"
   fi
   echo "OK"
 }
@@ -2444,14 +2153,6 @@ cmd_api_state() {
   load_state
   running=false
   pidof xray >/dev/null 2>&1 && running=true
-  dns_running=false
-  pidof https-dns-proxy >/dev/null 2>&1 && dns_running=true
-  dns_fallback=false
-  [ -f "$DNS_FALLBACK_FLAG" ] && dns_fallback=true
-  dns_degraded=false
-  xray_required_and_down=false
-  if [ "${DNS_PROXY_ENABLED:-0}" = "1" ] && [ "$running" != "true" ]; then xray_required_and_down=true; fi
-  if [ "${DNS_TUNNEL_ENABLED:-0}" = "1" ] && { [ -f "$DNS_DEGRADED_FLAG" ] || [ "$xray_required_and_down" = "true" ] || [ "$dns_running" != "true" ]; }; then dns_degraded=true; fi
   printf '{'
   printf '"service":{"running":%s},' "$running"
   printf '"current":{"summary":"%s","profileId":"%s"},' \
@@ -2459,11 +2160,8 @@ cmd_api_state() {
   printf '"settings":{"lanIface":"%s","tproxyPort":%s,"localSocksListen":"%s","localSocksPort":%s},' \
     "$(json_escape "${LAN_IFACE:-$DEFAULT_LAN_IFACE}")" "${TPROXY_PORT:-$DEFAULT_TPROXY_PORT}" \
     "$(json_escape "${LOCAL_SOCKS_LISTEN:-$DEFAULT_LOCAL_SOCKS_LISTEN}")" "${LOCAL_SOCKS_PORT:-$DEFAULT_LOCAL_SOCKS_PORT}"
-  printf '"dns":{"enabled":%s,"url":"%s","listenPort":%s,"failMode":"%s","proxyEnabled":%s,"running":%s,"fallback":%s,"degraded":%s},' \
-    "$([ "${DNS_TUNNEL_ENABLED:-0}" = "1" ] && echo true || echo false)" \
-    "$(json_escape "${DNS_DOH_URL:-$DEFAULT_DNS_DOH_URL}")" "${DNS_LISTEN_PORT:-$DEFAULT_DNS_LISTEN_PORT}" \
-    "$(json_escape "${DNS_FAIL_MODE:-$DEFAULT_DNS_FAIL_MODE}")" \
-    "$([ "${DNS_PROXY_ENABLED:-0}" = "1" ] && echo true || echo false)" "$dns_running" "$dns_fallback" "$dns_degraded"
+  printf '"dns":{"proxyEnabled":%s},' \
+    "$([ "${DNS_PROXY_ENABLED:-0}" = "1" ] && echo true || echo false)"
   printf '"profiles":['
   api_print_profiles
   printf '],"subscriptions":['
@@ -2603,8 +2301,7 @@ xray-manager commands:
   set-socks [host] [port]                                  use SOCKS upstream, defaults 127.0.0.1:1080
   use-socks [host] [port]                                  set SOCKS upstream and apply
   set-local-socks [listen] [port]                          local SOCKS listener, defaults 127.0.0.1:10818
-  set-dns <0|1> [DoH URL] [port] [strict|fallback] [proxy:0|1]
-  dns-test                                                 test a real answer through direct or proxied DoH
+  set-dns-proxy <0|1>                                     send router DNS through the active proxy
   set-lan-iface [iface]                                    LAN interface, default br-lan
   apply
   refresh
@@ -2650,9 +2347,7 @@ case "$cmd" in
   set-socks|set-upstream-socks) cmd_set_socks "${1:-}" "${2:-}" ;;
   use-socks|use-upstream-socks) cmd_use_socks "${1:-}" "${2:-}" ;;
   set-local-socks) cmd_set_local_socks "${1:-}" "${2:-}" ;;
-  set-dns) cmd_set_dns "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
-  dns-test) cmd_dns_test ;;
-  dns-watch) cmd_dns_watch ;;
+  set-dns-proxy) cmd_set_dns_proxy "${1:-}" ;;
   set-lan-iface) cmd_set_lan_iface "${1:-}" ;;
   apply) cmd_apply ;;
   refresh) cmd_refresh ;;
@@ -2675,8 +2370,6 @@ case "$cmd" in
   list-bypass-rules) list_rules ;;
   api-state) cmd_api_state ;;
   migrate-state) cmd_migrate_state ;;
-  migrate-dns-state) cmd_migrate_dns_state ;;
-  apply-dns-state) cmd_apply_dns_state ;;
   menu) cmd_menu ;;
   help|-h|--help) cmd_help ;;
   *) fail "unknown command: $cmd. Run: xray-manager help" ;;
@@ -2828,10 +2521,7 @@ case "$action" in
     [ "$first_code" -eq 0 ] || { LAST_CODE="$first_code"; LAST_OUTPUT="$first_output"; }
     ;;
   save_dns)
-    run_manager set-dns "$(form_value enabled)" "$(form_value url)" "$(form_value port)" "$(form_value fail_mode)" "$(form_value proxy_enabled)"
-    ;;
-  test_dns)
-    run_manager dns-test
+    run_manager set-dns-proxy "$(form_value proxy_enabled)"
     ;;
   *)
     send_json "400 Bad Request" '{"ok":false,"error":"unknown action"}'
@@ -2900,7 +2590,7 @@ EOF
       </section>
 
       <section id="settings" class="panel">
-        <div class="section-head"><div><h2>Настройки сети</h2><p>TProxy, локальный SOCKS и защищённый DNS</p></div></div>
+        <div class="section-head"><div><h2>Настройки сети</h2><p>TProxy, локальный SOCKS и DNS</p></div></div>
         <form id="settingsForm" class="settings-grid card">
           <label><span>LAN интерфейс</span><input name="lan_iface" required></label>
           <label><span>TProxy порт</span><input name="tproxy_port" disabled><small>Меняется через консоль</small></label>
@@ -2908,19 +2598,9 @@ EOF
           <label><span>SOCKS порт</span><input name="socks_port" inputmode="numeric" required></label>
           <div class="settings-actions"><button class="button primary">Сохранить</button></div>
         </form>
-        <form id="dnsForm" class="card dns-card">
-          <div class="card-title dns-title"><div><h3>Защищённый DNS</h3><p>dnsmasq → DoH напрямую или через активный Xray</p></div><span id="dnsStatus" class="status-badge off">Выключено</span></div>
-          <div class="dns-toggles">
-            <label class="toggle-row"><span class="toggle-copy"><strong>Использовать DoH</strong><small>При выключении dnsmasq снова берёт DNS из WAN</small></span><span class="switch"><input name="enabled" type="checkbox"><span></span></span></label>
-            <label class="toggle-row"><span class="toggle-copy"><strong>Через прокси</strong><small>DoH подключается через активный Xray; без этой опции — напрямую</small></span><span class="switch"><input name="proxy_enabled" type="checkbox"><span></span></span></label>
-          </div>
-          <div class="settings-grid dns-fields">
-            <label><span>DoH URL</span><input name="url" type="url" required></label>
-            <label><span>Локальный порт</span><input name="port" inputmode="numeric" required></label>
-            <label class="wide"><span>Если DoH недоступен</span><select name="fail_mode"><option value="strict">Без утечек — DNS временно не работает</option><option value="fallback">Вернуть WAN DNS до восстановления</option></select><small id="dnsFailHint"></small></label>
-            <div class="settings-actions"><button id="testDnsButton" type="button" class="button ghost">Проверить DNS</button><button class="button primary">Сохранить DNS</button></div>
-          </div>
-        </form>
+        <div id="dnsForm" class="card dns-card">
+          <label class="toggle-row"><span class="toggle-copy"><strong>Отправлять DNS через прокси</strong><small>Используется DNS-сервер, полученный роутером. При выключении DNS работает напрямую как обычно.</small></span><span class="switch"><input name="proxy_enabled" type="checkbox"><span></span></span></label>
+        </div>
       </section>
     </main>
   </div>
@@ -2935,7 +2615,7 @@ EOF
   </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="./app.js?v=20260828-3"></script>
+  <script src="./app.js?v=20260910-1"></script>
 </body>
 </html>
 EOF
@@ -2970,9 +2650,7 @@ function render(){
   $('#profilesEmpty').hidden=state.profiles.length>0;
   renderRules('mac',state.bypass.macs,$('#macList'));renderRules('domain',state.bypass.domains,$('#domainList'));$('#macCount').textContent=state.bypass.macs.length;$('#domainCount').textContent=state.bypass.domains.length;
   const form=$('#settingsForm');form.lan_iface.value=state.settings.lanIface;form.tproxy_port.value=state.settings.tproxyPort;form.socks_listen.value=state.settings.localSocksListen;form.socks_port.value=state.settings.localSocksPort;
-  const dnsForm=$('#dnsForm');dnsForm.enabled.checked=state.dns.enabled;dnsForm.proxy_enabled.checked=state.dns.proxyEnabled;dnsForm.url.value=state.dns.url;dnsForm.port.value=state.dns.listenPort;dnsForm.fail_mode.value=state.dns.failMode;
-  const dnsStatus=$('#dnsStatus');dnsStatus.className='status-badge '+(!state.dns.enabled?'off':state.dns.fallback||state.dns.degraded?'warn':'on');dnsStatus.textContent=!state.dns.enabled?'WAN DNS':state.dns.fallback?'Резервный WAN DNS':state.dns.degraded?'DNS недоступен':state.dns.proxyEnabled?'DoH через Xray':'DoH напрямую';
-  $('#dnsFailHint').textContent=state.dns.failMode==='fallback'?'При аварии DNS временно станет виден провайдеру. Watchdog вернёт DoH после восстановления.':'При аварии утечки не будет, но новые имена перестанут открываться до восстановления Xray.';
+  $('#dnsForm').querySelector('[name="proxy_enabled"]').checked=state.dns.proxyEnabled;
 }
 function renderProfile(profile){const latency=pingResults.get(profile.id);return `<article class="profile ${profile.active?'active':''} ${profile.enabled?'':'off'}"><div class="profile-main"><div class="protocol-icon">${escapeHtml(profile.kind.slice(0,2))}</div><div style="min-width:0"><h3>${escapeHtml(profile.name)}</h3><div class="meta"><span class="badge">${escapeHtml(profile.kind)}</span><span>${escapeHtml(profile.host)}</span>${profile.active?'<span>· активно</span>':''}</div></div></div><div class="profile-actions"><button class="button ghost small ping-button" data-ping-profile="${escapeHtml(profile.id)}" title="Проверить ICMP-задержку">${latency?`${escapeHtml(latency)} мс`:'Пинг'}</button><label class="switch" title="Включить профиль"><input type="checkbox" data-profile-toggle="${escapeHtml(profile.id)}" ${profile.enabled?'checked':''}><span></span></label><button class="button small" data-select="${escapeHtml(profile.id)}" ${!profile.enabled||profile.active?'disabled':''}>Выбрать</button><button class="icon-button danger" data-delete-profile="${escapeHtml(profile.id)}" title="Удалить">×</button></div></article>`;}
 function renderProfileGroup(title,subtitle,profiles,source=''){return `<section class="subscription-group"><div class="subscription-head"><div class="subscription-title"><h3>${escapeHtml(title)} <span class="group-count">${profiles.length}</span></h3><p title="${escapeHtml(subtitle)}">${escapeHtml(subtitle)}</p></div>${source?`<div class="subscription-actions"><button class="button ghost small" data-refresh-subscription="${escapeHtml(source)}">↻ Обновить</button><button class="button ghost small danger" data-delete-subscription="${escapeHtml(source)}" data-subscription-count="${profiles.length}">Удалить</button></div>`:''}</div><div class="subscription-nodes">${profiles.map(renderProfile).join('')}</div></section>`;}
@@ -2982,7 +2660,7 @@ $$('.tab').forEach(tab=>tab.addEventListener('click',()=>{$$('.tab').forEach(x=>
 $('#openAddDialog').addEventListener('click',()=>$('#addDialog').showModal());
 $('#addLinksForm').addEventListener('submit',async event=>{if(event.submitter?.value==='cancel')return;event.preventDefault();const form=event.currentTarget;try{await request('add_links',{links:form.links.value});form.reset();$('#addDialog').close();}catch{}});
 $('#applyButton').addEventListener('click',()=>request('apply'));
-$('#serviceButton').addEventListener('click',event=>{const enabling=event.currentTarget.dataset.enabled==='1';if(!enabling&&state.dns.enabled&&state.dns.proxyEnabled&&state.dns.failMode==='strict'&&!confirm('DNS настроен через Xray: после его остановки DNS перестанет отвечать. Остановить?'))return;request('service',{enabled:enabling?'1':'0'});});
+$('#serviceButton').addEventListener('click',event=>{const enabling=event.currentTarget.dataset.enabled==='1';if(!enabling&&state.dns.proxyEnabled&&!confirm('DNS отправляется через Xray: после его остановки DNS перестанет отвечать. Остановить?'))return;request('service',{enabled:enabling?'1':'0'});});
 $('#refreshAllSubscriptions').addEventListener('click',()=>request('refresh_all_subscriptions'));
 $('#profiles').addEventListener('click',event=>{const select=event.target.closest('[data-select]');const del=event.target.closest('[data-delete-profile]');const ping=event.target.closest('[data-ping-profile]');const refresh=event.target.closest('[data-refresh-subscription]');const delSubscription=event.target.closest('[data-delete-subscription]');if(select)request('select_profile',{id:select.dataset.select});if(del&&confirm('Удалить это подключение?'))request('delete_profile',{id:del.dataset.deleteProfile});if(ping)pingProfile(ping.dataset.pingProfile,ping);if(refresh)request('refresh_subscription',{source:refresh.dataset.refreshSubscription});if(delSubscription&&confirm(`Удалить подписку и все её подключения (${delSubscription.dataset.subscriptionCount})?`))request('delete_subscription',{source:delSubscription.dataset.deleteSubscription});});
 $('#profiles').addEventListener('change',event=>{const input=event.target.closest('[data-profile-toggle]');if(input)request('set_profile_enabled',{id:input.dataset.profileToggle,enabled:input.checked?'1':'0'}).catch(()=>load());});
@@ -2990,9 +2668,7 @@ $$('[data-add-kind]').forEach(form=>form.addEventListener('submit',async event=>
 $('#bypass').addEventListener('change',event=>{const input=event.target.closest('[data-rule-toggle]');if(input)request('set_bypass_enabled',{kind:input.dataset.ruleToggle,value:input.dataset.value,enabled:input.checked?'1':'0'}).catch(()=>load());});
 $('#bypass').addEventListener('click',event=>{const button=event.target.closest('[data-rule-delete]');if(button&&confirm('Удалить правило?'))request('delete_bypass',{kind:button.dataset.ruleDelete,value:button.dataset.value});});
 $('#settingsForm').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;await request('save_settings',{lan_iface:form.lan_iface.value,socks_listen:form.socks_listen.value,socks_port:form.socks_port.value});});
-$('#dnsForm').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;try{await request('save_dns',{enabled:form.enabled.checked?'1':'0',proxy_enabled:form.proxy_enabled.checked?'1':'0',url:form.url.value,port:form.port.value,fail_mode:form.fail_mode.value});}catch{await load();}});
-$('#dnsForm').fail_mode.addEventListener('change',event=>{$('#dnsFailHint').textContent=event.currentTarget.value==='fallback'?'При аварии DNS временно станет виден провайдеру. Watchdog вернёт DoH после восстановления.':'При аварии утечки не будет, но новые имена перестанут открываться до восстановления Xray.';});
-$('#testDnsButton').addEventListener('click',()=>request('test_dns'));
+$('#dnsForm').addEventListener('change',event=>{const input=event.target.closest('[name="proxy_enabled"]');if(input)request('save_dns',{proxy_enabled:input.checked?'1':'0'}).catch(()=>load());});
 load();
 EOF
 
@@ -3007,7 +2683,6 @@ main() {
   need_root
   ensure_dirs
   write_state_defaults
-  install_packages
   install_xray_core
   write_init_scripts
   write_manager
@@ -3017,21 +2692,26 @@ main() {
   /etc/init.d/xray enable
   /etc/init.d/xray-tproxy enable
 
-  # Bring Xray up before restoring an optional proxied DoH setup. Otherwise
-  # its health check necessarily fails and can leave dnsmasq pointing at a
-  # dead local resolver after an interrupted upgrade.
+  # Retire the previous DoH integration and put dnsmasq back on the router's
+  # original resolver configuration before applying the simple DNS switch.
   # shellcheck disable=SC1090
   . "$STATE_FILE"
-  if [ -n "${CURRENT_URL:-}" ]; then
-    /usr/bin/xray-manager apply
+  saved_dns_proxy="${DNS_PROXY_ENABLED:-0}"
+  /etc/init.d/xray-dns-watchdog stop >/dev/null 2>&1 || true
+  /etc/init.d/xray-dns-watchdog disable >/dev/null 2>&1 || true
+  /etc/init.d/https-dns-proxy stop >/dev/null 2>&1 || true
+  /etc/init.d/https-dns-proxy disable >/dev/null 2>&1 || true
+  rm -f /etc/init.d/xray-dns-watchdog /etc/xray-manager/dns-fallback /tmp/xray-manager-dns-degraded
+  if [ -s /etc/xray-manager/dhcp-before-doh.uci ]; then
+    uci import dhcp < /etc/xray-manager/dhcp-before-doh.uci
+    uci commit dhcp
+    /etc/init.d/dnsmasq restart >/dev/null 2>&1
+    rm -f /etc/xray-manager/dhcp-before-doh.uci
   fi
 
-  /usr/bin/xray-manager migrate-dns-state
-  if /usr/bin/xray-manager show | grep -q '^DNS_TUNNEL_ENABLED=1$'; then
-    /usr/bin/xray-manager apply-dns-state
-  else
-    /etc/init.d/https-dns-proxy stop >/dev/null 2>&1 || true
-    /etc/init.d/https-dns-proxy disable >/dev/null 2>&1 || true
+  /usr/bin/xray-manager set-dns-proxy 0
+  if [ "$saved_dns_proxy" = "1" ] && [ -n "${CURRENT_URL:-}" ]; then
+    /usr/bin/xray-manager set-dns-proxy 1
   fi
 
   echo
@@ -3042,7 +2722,7 @@ main() {
   echo "  xray-manager use 'vless://...'"
   echo "  xray-manager use 'https://example.com/subscription'"
   echo "  xray-manager use-socks"
-  echo "  xray-manager set-dns 1 'https://dns.google/dns-query' 5053 strict 0"
+  echo "  xray-manager set-dns-proxy 1"
   echo "  xray-manager select-node"
   echo "  xray-manager test"
   echo "  Web UI: http://$(uci -q get network.lan.ipaddr || echo 192.168.1.1)/xray-manager/"

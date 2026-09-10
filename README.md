@@ -12,7 +12,7 @@
 - повторный выбор ноды без переустановки
 - SOCKS5 upstream, включая локальный `127.0.0.1:1080`
 - локальный SOCKS listener для тестов и приложений
-- Google DoH напрямую по умолчанию, с опциональным маршрутом через локальный SOCKS Xray
+- простой переключатель отправки обычного DNS через активный прокси
 - bypass по MAC и доменным правилам с добавлением, удалением и включением/выключением
 - проверка Xray/nft перед применением конфига
 - автоопределение архитектуры Xray
@@ -30,7 +30,7 @@
 ## Установка
 
 ```sh
-opkg update && opkg install ca-bundle ca-certificates uclient-fetch && uclient-fetch -q -O - https://raw.githubusercontent.com/alexeeeeeeey/OpenWrt-Xray-TProxy-Setup/main/install.sh | sh
+opkg update && opkg install kmod-nft-tproxy kmod-nf-tproxy unzip uclient-fetch ca-bundle ca-certificates openssl-util coreutils-base64 uhttpd && uclient-fetch -q -O - https://raw.githubusercontent.com/alexeeeeeeey/OpenWrt-Xray-TProxy-Setup/main/install.sh | sh
 ```
 
 После установки доступен менеджер:
@@ -209,41 +209,23 @@ xray-manager off
 
 ---
 
-## Защищённый DNS
+## DNS через прокси
 
-DoH включён по умолчанию и подключается к серверу напрямую, независимо от состояния Xray:
+В разделе «Настройки» есть один переключатель «Отправлять DNS через прокси».
 
-```text
-клиент → dnsmasq → https-dns-proxy → Google DoH
-```
+- Выключен: `dnsmasq` использует штатные DNS-серверы роутера.
+- Включён: менеджер берёт текущий DNS-сервер из WAN-конфигурации роутера, передаёт запросы на локальный вход Xray и маршрутизирует их через активный прокси.
 
-В разделе «Настройки» есть отдельный переключатель «Отправлять DoH через прокси». В этом режиме схема становится такой:
-
-```text
-клиент → dnsmasq → https-dns-proxy → SOCKS 127.0.0.1:10818 → Xray → Google DoH
-```
-
-По умолчанию используются `https://dns.google/dns-query`, локальный порт `5053` и IPv4. `https-dns-proxy` запускается с `force_dns=0`, `notrack_dns=0` и `dnsmasq_config_update=-`: он не создаёт firewall-правила и не меняет dnsmasq самостоятельно.
-
-Включение выполняется безопасно в два этапа: менеджер сначала запускает только локальный DoH и проверяет реальный DNS-ответ на `127.0.0.1:5053`. Только после успешной проверки он сохраняет полный `uci export dhcp` и переключает dnsmasq. Если тест не проходит, dnsmasq остаётся на прежнем рабочем DNS.
-
-При выключении сохранённый DHCP-конфиг импортируется целиком и перезапускается dnsmasq. Если уже существует `/root/dhcp-before-doh.txt` из ручной настройки, менеджер использует его как исходную резервную копию.
-
-Доступны два режима отказа:
-
-- `strict` — не переходит на обычный WAN DNS. При отказе DoH новые запросы временно не резолвятся, кэш dnsmasq продолжает работать.
-- `fallback` — watchdog после двух неудачных проверок возвращает WAN DNS, а затем периодически проверяет DoH и автоматически включает его после восстановления. Во время аварии DNS виден провайдеру.
+Отдельный DNS-адрес, URL, порт и режим отказа настраивать не нужно. Перед переключением менеджер сохраняет конфигурацию `dnsmasq`; при выключении она восстанавливается.
 
 То же из CLI:
 
 ```sh
-xray-manager set-dns 1 'https://dns.google/dns-query' 5053 strict 0  # напрямую
-xray-manager set-dns 1 'https://dns.google/dns-query' 5053 strict 1  # через Xray
-xray-manager dns-test
-xray-manager set-dns 0
+xray-manager set-dns-proxy 1  # через активный прокси
+xray-manager set-dns-proxy 0  # напрямую через DNS роутера
 ```
 
-При обновлении менеджер распознаёт активную существующую настройку `https-dns-proxy` и сохраняет её прямой или SOCKS-режим.
+Если Xray остановлен при включённом переключателе, DNS через прокси также недоступен.
 
 ---
 
@@ -319,7 +301,6 @@ xray-manager apply
 - `/etc/xray/nft.rules`
 - `/etc/init.d/xray`
 - `/etc/init.d/xray-tproxy`
-- `/etc/init.d/xray-dns-watchdog`
 - `/etc/xray-manager/config`
 - `/etc/xray-manager/links`
 - `/www/xray-manager/`
