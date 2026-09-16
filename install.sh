@@ -12,6 +12,8 @@ XRAY_DIR="/etc/xray"
 XRAY_CONFIG="${XRAY_DIR}/config.json"
 NFT_RULES="${XRAY_DIR}/nft.rules"
 LINKS_FILE="${BASE_DIR}/links"
+JSON_SUBS_DIR="${BASE_DIR}/json-subscriptions"
+GENERATED_DIR="${BASE_DIR}/generated"
 
 DEFAULT_BYPASS_RULES="domain:restream-media.net,.ru,.xn--p1ai"
 DEFAULT_LAN_IFACE="br-lan"
@@ -20,6 +22,8 @@ DEFAULT_TPROXY_MARK="1"
 DEFAULT_TPROXY_TABLE="100"
 DEFAULT_LOCAL_SOCKS_LISTEN="127.0.0.1"
 DEFAULT_LOCAL_SOCKS_PORT="10818"
+DEFAULT_SUBSCRIPTION_REFRESH_HOURS="0"
+INSTALLER_URL="https://raw.githubusercontent.com/alexeeeeeeey/OpenWrt-Xray-TProxy-Setup/main/install.sh"
 
 fail() {
   echo "Error: $*" >&2
@@ -35,7 +39,7 @@ state_escape() {
 }
 
 ensure_dirs() {
-  mkdir -p "$BASE_DIR" "$XRAY_DIR" /usr/bin /etc/init.d /root
+  mkdir -p "$BASE_DIR" "$JSON_SUBS_DIR" "$GENERATED_DIR" "$XRAY_DIR" /usr/bin /etc/init.d /root
 }
 
 append_state_key() {
@@ -64,6 +68,7 @@ TPROXY_TABLE="${DEFAULT_TPROXY_TABLE}"
 LOCAL_SOCKS_LISTEN="${DEFAULT_LOCAL_SOCKS_LISTEN}"
 LOCAL_SOCKS_PORT="${DEFAULT_LOCAL_SOCKS_PORT}"
 DNS_PROXY_ENABLED="0"
+SUBSCRIPTION_REFRESH_HOURS="${DEFAULT_SUBSCRIPTION_REFRESH_HOURS}"
 LAST_SOURCE=""
 ACTIVE_PROFILE_ID=""
 EOF
@@ -88,6 +93,7 @@ EOF
   append_state_key LOCAL_SOCKS_LISTEN "$DEFAULT_LOCAL_SOCKS_LISTEN"
   append_state_key LOCAL_SOCKS_PORT "$DEFAULT_LOCAL_SOCKS_PORT"
   append_state_key DNS_PROXY_ENABLED "0"
+  append_state_key SUBSCRIPTION_REFRESH_HOURS "$DEFAULT_SUBSCRIPTION_REFRESH_HOURS"
   append_state_key LAST_SOURCE ""
   append_state_key ACTIVE_PROFILE_ID ""
   touch "$LINKS_FILE"
@@ -146,11 +152,16 @@ install_xray_core() {
   if [ -x /usr/bin/xray ]; then
     installed_xray_version="$(/usr/bin/xray version 2>/dev/null | awk 'NR == 1 { print $2; exit }')"
   fi
-  if [ "$installed_xray_version" = "$XRAY_VERSION" ]; then
+  if [ "$installed_xray_version" = "$XRAY_VERSION" ] && \
+     [ -s /usr/bin/geosite.dat ] && [ -s /usr/bin/geoip.dat ]; then
     echo "Xray ${XRAY_VERSION} is already installed"
     return 0
   fi
-  echo "Downloading Xray ${XRAY_VERSION} (${XRAY_ARCH})"
+  if [ "$installed_xray_version" = "$XRAY_VERSION" ]; then
+    echo "Xray ${XRAY_VERSION} is installed, restoring missing geosite.dat/geoip.dat"
+  else
+    echo "Downloading Xray ${XRAY_VERSION} (${XRAY_ARCH})"
+  fi
 
   TMP_DIR="$(mktemp -d)"
   trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
@@ -158,13 +169,14 @@ install_xray_core() {
   download_file "$XRAY_URL" "$TMP_DIR/xray.zip"
   unzip -oq "$TMP_DIR/xray.zip" -d "$TMP_DIR"
   [ -f "$TMP_DIR/xray" ] || fail "xray binary was not found in downloaded archive"
+  [ -s "$TMP_DIR/geosite.dat" ] || fail "geosite.dat was not found in the Xray archive"
+  [ -s "$TMP_DIR/geoip.dat" ] || fail "geoip.dat was not found in the Xray archive"
 
   mv -f "$TMP_DIR/xray" /usr/bin/xray
   chmod 0755 /usr/bin/xray
-
-  rm -f /usr/bin/geosite.dat /usr/bin/geoip.dat
-  : > /usr/bin/geosite.dat
-  : > /usr/bin/geoip.dat
+  mv -f "$TMP_DIR/geosite.dat" /usr/bin/geosite.dat
+  mv -f "$TMP_DIR/geoip.dat" /usr/bin/geoip.dat
+  chmod 0644 /usr/bin/geosite.dat /usr/bin/geoip.dat
 
   rm -rf "$TMP_DIR"
   trap - EXIT INT TERM
@@ -229,6 +241,8 @@ XRAY_DIR="/etc/xray"
 XRAY_CONFIG="${XRAY_DIR}/config.json"
 NFT_RULES="${XRAY_DIR}/nft.rules"
 LINKS_FILE="${BASE_DIR}/links"
+JSON_SUBS_DIR="${BASE_DIR}/json-subscriptions"
+GENERATED_DIR="${BASE_DIR}/generated"
 
 DEFAULT_BYPASS_RULES="domain:restream-media.net,.ru,.xn--p1ai"
 DEFAULT_LAN_IFACE="br-lan"
@@ -239,6 +253,8 @@ DEFAULT_LOCAL_SOCKS_LISTEN="127.0.0.1"
 DEFAULT_LOCAL_SOCKS_PORT="10818"
 DEFAULT_DNS_PROXY_PORT="1053"
 DNS_DHCP_BACKUP="${BASE_DIR}/dhcp-before-dns-proxy.uci"
+DEFAULT_SUBSCRIPTION_REFRESH_HOURS="0"
+INSTALLER_URL="https://raw.githubusercontent.com/alexeeeeeeey/OpenWrt-Xray-TProxy-Setup/main/install.sh"
 
 fail() {
   echo "Error: $*" >&2
@@ -311,19 +327,19 @@ download_file() {
   out="$2"
 
   if command -v uclient-fetch >/dev/null 2>&1; then
-    if uclient-fetch -q -O "$out" "$url"; then
+    if uclient-fetch -q --header='User-Agent: Happ/5.6.0/ios/2608171408551' --header='x-hwid: 1234567890abcdef' --header='x-device-os: iOS' --header='x-ver-os: 18.6' --header='x-device-model: iPhone17,1' --header='Accept: application/json, text/plain, */*' -O "$out" "$url" 2>/dev/null; then
       return 0
     fi
   fi
 
   if command -v wget >/dev/null 2>&1; then
-    if wget -q -O "$out" "$url"; then
+    if wget -q --header='User-Agent: Happ/5.6.0/ios/2608171408551' --header='x-hwid: 1234567890abcdef' --header='x-device-os: iOS' --header='x-ver-os: 18.6' --header='x-device-model: iPhone17,1' --header='Accept: application/json, text/plain, */*' -O "$out" "$url" 2>/dev/null; then
       return 0
     fi
   fi
 
   if command -v curl >/dev/null 2>&1 && curl --version >/dev/null 2>&1; then
-    if curl -fsSL --show-error --retry 2 --retry-delay 1 --connect-timeout 10 --max-time 120 "$url" -o "$out"; then
+    if curl -fsSL --show-error --retry 2 --retry-delay 1 --connect-timeout 10 --max-time 120 -A 'Happ/5.6.0/ios/2608171408551' -H 'x-hwid: 1234567890abcdef' -H 'x-device-os: iOS' -H 'x-ver-os: 18.6' -H 'x-device-model: iPhone17,1' -H 'Accept: application/json, text/plain, */*' --noproxy '*' "$url" -o "$out"; then
       return 0
     fi
   fi
@@ -331,8 +347,18 @@ download_file() {
   fail "failed to download: $url"
 }
 
+# Subscription and updater traffic must never inherit a proxy setting.  This
+# also makes refreshes recoverable when the selected node is dead.
+download_direct_file() {
+  url="$1"
+  out="$2"
+  HTTPS_PROXY= HTTP_PROXY= ALL_PROXY= https_proxy= http_proxy= all_proxy= NO_PROXY='*' no_proxy='*' \
+    download_file "$url" "$out"
+}
+
 load_state() {
   [ -f "$STATE_FILE" ] || fail "state file not found: $STATE_FILE"
+  mkdir -p "$JSON_SUBS_DIR" "$GENERATED_DIR"
   # shellcheck disable=SC1090
   . "$STATE_FILE"
 
@@ -353,6 +379,7 @@ load_state() {
   : "${LOCAL_SOCKS_LISTEN:=$DEFAULT_LOCAL_SOCKS_LISTEN}"
   : "${LOCAL_SOCKS_PORT:=$DEFAULT_LOCAL_SOCKS_PORT}"
   : "${DNS_PROXY_ENABLED:=0}"
+  : "${SUBSCRIPTION_REFRESH_HOURS:=$DEFAULT_SUBSCRIPTION_REFRESH_HOURS}"
   : "${LAST_SOURCE:=}"
   : "${ACTIVE_PROFILE_ID:=}"
   touch "$LINKS_FILE"
@@ -378,6 +405,7 @@ TPROXY_TABLE="$(state_escape "${TPROXY_TABLE:-$DEFAULT_TPROXY_TABLE}")"
 LOCAL_SOCKS_LISTEN="$(state_escape "${LOCAL_SOCKS_LISTEN:-$DEFAULT_LOCAL_SOCKS_LISTEN}")"
 LOCAL_SOCKS_PORT="$(state_escape "${LOCAL_SOCKS_PORT:-$DEFAULT_LOCAL_SOCKS_PORT}")"
 DNS_PROXY_ENABLED="$(state_escape "${DNS_PROXY_ENABLED:-0}")"
+SUBSCRIPTION_REFRESH_HOURS="$(state_escape "${SUBSCRIPTION_REFRESH_HOURS:-$DEFAULT_SUBSCRIPTION_REFRESH_HOURS}")"
 LAST_SOURCE="$(state_escape "${LAST_SOURCE:-}")"
 ACTIVE_PROFILE_ID="$(state_escape "${ACTIVE_PROFILE_ID:-}")"
 EOS
@@ -430,15 +458,82 @@ fetch_subscription_urls_file() {
   out_file="$2"
   tmp_raw="$(mktemp)"
 
-  if ! download_file "$sub_url" "$tmp_raw"; then
+  if ! download_direct_file "$sub_url" "$tmp_raw"; then
     rm -f "$tmp_raw"
     fail "failed to download subscription"
   fi
 
-  decode_subscription_blob "$tmp_raw" | tr -d '\r' | extract_supported_urls > "$out_file"
+  first_char="$(sed -n 's/^[[:space:]]*\(.\).*/\1/p' "$tmp_raw" | head -n 1)"
+  if [ "$first_char" = "{" ] || [ "$first_char" = "[" ]; then
+    import_json_subscription "$sub_url" "$tmp_raw" "$out_file"
+  else
+    decode_subscription_blob "$tmp_raw" | tr -d '\r' | extract_supported_urls > "$out_file"
+  fi
   rm -f "$tmp_raw"
 
   [ -s "$out_file" ] || fail "no supported VLESS, Hysteria2 or SOCKS entries found in subscription"
+}
+
+json_subscription_key() {
+  value="$1"
+  if command -v md5sum >/dev/null 2>&1; then
+    printf '%s' "$value" | md5sum | awk '{ print $1 }'
+    return 0
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$value" | sha256sum | awk '{ print $1 }'
+    return 0
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    printf '%s' "$value" | openssl dgst -sha256 2>/dev/null | sed 's/^.*= //'
+    return 0
+  fi
+  fail "md5sum, sha256sum or openssl is required for JSON subscriptions"
+}
+
+import_json_subscription() {
+  sub_url="$1"
+  json_file="$2"
+  out_file="$3"
+  command -v jsonfilter >/dev/null 2>&1 || fail "JSON subscriptions require jsonfilter"
+  key="$(json_subscription_key "$sub_url")"
+  case "$key" in ''|*[!0-9a-fA-F]*) fail "failed to create a safe JSON subscription id" ;; esac
+  target_dir="${JSON_SUBS_DIR}/${key}"
+  new_dir="${target_dir}.new.$$"
+  case "$target_dir" in "${JSON_SUBS_DIR}/"*) ;; *) fail "unsafe JSON subscription directory" ;; esac
+  case "$new_dir" in "${JSON_SUBS_DIR}/"*.new.*) ;; *) fail "unsafe JSON subscription temporary directory" ;; esac
+  rm -rf "$new_dir"
+  mkdir -p "$new_dir"
+  first_char="$(sed -n 's/^[[:space:]]*\(.\).*/\1/p' "$json_file" | head -n 1)"
+  if [ "$first_char" = "[" ]; then
+    jsonfilter -i "$json_file" -e '@[*]' > "$new_dir/configs" 2>/dev/null || fail "JSON subscription array is invalid"
+  else
+    cat "$json_file" > "$new_dir/configs"
+  fi
+  index=0
+  while IFS= read -r config_json; do
+    [ -n "$config_json" ] || continue
+    index=$((index + 1))
+    : > "$new_dir/outbounds-${index}"
+    jsonfilter -s "$config_json" -e '@.outbounds[*]' 2>/dev/null | while IFS= read -r outbound; do
+      protocol="$(jsonfilter -s "$outbound" -e '@.protocol' 2>/dev/null || true)"
+      case "$protocol" in freedom|blackhole|dns|'') continue ;; esac
+      printf '%s\n' "$outbound" >> "$new_dir/outbounds-${index}"
+    done
+    [ -s "$new_dir/outbounds-${index}" ] || { rm -f "$new_dir/outbounds-${index}"; continue; }
+    jsonfilter -s "$config_json" -e '@.routing.rules[*]' > "$new_dir/rules-${index}" 2>/dev/null || : > "$new_dir/rules-${index}"
+    jsonfilter -s "$config_json" -e '@.routing.balancers[*]' > "$new_dir/balancers-${index}" 2>/dev/null || : > "$new_dir/balancers-${index}"
+    jsonfilter -s "$config_json" -e '@.observatory' > "$new_dir/observatory-${index}" 2>/dev/null || : > "$new_dir/observatory-${index}"
+    jsonfilter -s "$config_json" -e '@.burstObservatory' > "$new_dir/burst-observatory-${index}" 2>/dev/null || : > "$new_dir/burst-observatory-${index}"
+    remarks="$(jsonfilter -s "$config_json" -e '@.remarks' 2>/dev/null || true)"
+    [ -n "$remarks" ] || remarks="JSON profile ${index}"
+    printf '%s\n' "$remarks" > "$new_dir/name-${index}"
+    printf 'jsoncfg://%s/%s\n' "$key" "$index" >> "$out_file"
+  done < "$new_dir/configs"
+  rm -f "$new_dir/configs"
+  [ -s "$out_file" ] || { rm -rf "$new_dir"; fail "JSON subscription has no supported proxy outbounds"; }
+  rm -rf "$target_dir"
+  mv "$new_dir" "$target_dir"
 }
 
 line_count() {
@@ -485,11 +580,13 @@ url_kind() {
     vless://*) echo "vless" ;;
     hysteria2://*|hy2://*) echo "hysteria2" ;;
     socks://*|socks5://*) echo "socks" ;;
+    jsoncfg://*) echo "json" ;;
     *) echo "unknown" ;;
   esac
 }
 
 url_host() {
+  case "$1" in jsoncfg://*) printf '%s' 'JSON subscription'; return 0 ;; esac
   raw="${1#*://}"
   main="${raw%%#*}"
   main="${main%%\?*}"
@@ -506,6 +603,13 @@ url_host() {
 
 node_label() {
   url="$1"
+  case "$url" in
+    jsoncfg://*)
+      ref="${url#jsoncfg://}"; key="${ref%%/*}"; index="${ref##*/}"
+      cat "${JSON_SUBS_DIR}/${key}/name-${index}" 2>/dev/null || printf 'JSON profile %s' "$index"
+      return 0
+      ;;
+  esac
   case "$url" in
     *#*) label="$(url_decode "${url##*#}")" ;;
     *) label="$(url_host "$url")" ;;
@@ -700,6 +804,7 @@ cmd_add_link() {
     MODE="url"
   fi
   save_state
+  rebuild_probe_configs
   echo "Profile saved: $PROFILE_RESULT_ID"
 }
 
@@ -716,6 +821,7 @@ cmd_import_links() {
   sync_subscription_loaded "$sub_url" "$tmp_urls"
   rm -f "$tmp_urls"
   save_state
+  rebuild_probe_configs
   echo "Subscription updated: added $SYNC_ADDED, kept $SYNC_KEPT, removed $SYNC_REMOVED"
 }
 
@@ -735,6 +841,7 @@ cmd_refresh_links() {
   sync_subscription_loaded "$sub_url" "$tmp_urls"
   rm -f "$tmp_urls"
   save_state
+  rebuild_probe_configs
   echo "Subscription updated: added $SYNC_ADDED, kept $SYNC_KEPT, removed $SYNC_REMOVED"
 }
 
@@ -751,6 +858,44 @@ cmd_refresh_all_links() {
     cmd_refresh_links "$(b64_decode "$source_b64")"
   done < "$tmp_sources"
   rm -f "$tmp_sources"
+  load_state
+  [ -z "${ACTIVE_PROFILE_ID:-}" ] || cmd_apply_loaded
+}
+
+install_refresh_cron() {
+  hours="${1:-0}"
+  is_number "$hours" || fail "интервал автообновления должен быть числом часов"
+  [ "$hours" -ge 0 ] 2>/dev/null && [ "$hours" -le 24 ] 2>/dev/null || fail "интервал должен быть от 0 до 24 часов"
+  cron_file=/etc/crontabs/root
+  touch "$cron_file"
+  tmp_cron="$(mktemp)"
+  grep -v '# xray-manager-subscriptions$' "$cron_file" > "$tmp_cron" || true
+  if [ "$hours" -gt 0 ]; then
+    if [ "$hours" = "24" ]; then schedule='17 3 * * *'; else schedule="17 */${hours} * * *"; fi
+    printf '%s /usr/bin/xray-manager refresh-all-links >/tmp/xray-manager-refresh.log 2>&1 # xray-manager-subscriptions\n' "$schedule" >> "$tmp_cron"
+  fi
+  mv "$tmp_cron" "$cron_file"
+  /etc/init.d/cron enable >/dev/null 2>&1 || true
+  /etc/init.d/cron restart >/dev/null 2>&1 || true
+}
+
+cmd_set_auto_refresh() {
+  load_state
+  SUBSCRIPTION_REFRESH_HOURS="${1:-0}"
+  install_refresh_cron "$SUBSCRIPTION_REFRESH_HOURS"
+  save_state
+  if [ "$SUBSCRIPTION_REFRESH_HOURS" = "0" ]; then echo "Автообновление подписок выключено"; else echo "Подписки обновляются каждые ${SUBSCRIPTION_REFRESH_HOURS} ч"; fi
+}
+
+cmd_self_update() {
+  tmp_installer="$(mktemp)"
+  trap 'rm -f "$tmp_installer"' EXIT INT TERM
+  download_direct_file "$INSTALLER_URL" "$tmp_installer"
+  grep -q '^#!/bin/sh' "$tmp_installer" || fail "репозиторий вернул некорректный install.sh"
+  sh "$tmp_installer"
+  rm -f "$tmp_installer"
+  trap - EXIT INT TERM
+  echo "Xray Manager обновлён из репозитория"
 }
 
 cmd_list_links() {
@@ -823,6 +968,7 @@ cmd_del_link() {
     CURRENT_URL=""
   fi
   save_state
+  rm -f "${GENERATED_DIR}/${profile_id}.probe.json"
   echo "Profile removed"
 }
 
@@ -863,39 +1009,128 @@ cmd_del_subscription() {
     fi
   fi
 
+  json_key="$(json_subscription_key "$sub_url")"
+  case "$json_key" in *[!0-9]*) ;; *) rm -rf "${JSON_SUBS_DIR:?}/${json_key}" ;; esac
+
   save_state
+  rebuild_probe_configs
   echo "Subscription removed: $removed_count profiles"
+}
+
+write_profile_probe_config() {
+  profile_url="$1"
+  probe_port="$2"
+  destination="$3"
+  tmp_config_base="$(mktemp)"
+  tmp_config="${tmp_config_base}.json"
+  rm -f "$tmp_config_base"
+  proxy_json="$(build_proxy_outbound_json "$profile_url")"
+  probe_routing='"rules":[]'
+  probe_extra=""
+  case "$profile_url" in
+    jsoncfg://*)
+      probe_ref="${profile_url#jsoncfg://}"; probe_key="${probe_ref%%/*}"; probe_index="${probe_ref##*/}"
+      probe_rules="$(awk 'NF { if (seen++) printf ",\n"; print }' "${JSON_SUBS_DIR}/${probe_key}/rules-${probe_index}" 2>/dev/null || true)"
+      probe_balancers="$(awk 'NF { if (seen++) printf ",\n"; print }' "${JSON_SUBS_DIR}/${probe_key}/balancers-${probe_index}" 2>/dev/null || true)"
+      probe_routing="\"balancers\":[${probe_balancers}],\"rules\":[${probe_rules}]"
+      [ ! -s "${JSON_SUBS_DIR}/${probe_key}/observatory-${probe_index}" ] || probe_extra="${probe_extra},\"observatory\":$(cat "${JSON_SUBS_DIR}/${probe_key}/observatory-${probe_index}")"
+      [ ! -s "${JSON_SUBS_DIR}/${probe_key}/burst-observatory-${probe_index}" ] || probe_extra="${probe_extra},\"burstObservatory\":$(cat "${JSON_SUBS_DIR}/${probe_key}/burst-observatory-${probe_index}")"
+      ;;
+  esac
+  cat > "$tmp_config" <<EOS
+{"log":{"loglevel":"warning"},"inbounds":[{"tag":"probe","listen":"127.0.0.1","port":$probe_port,"protocol":"socks","settings":{"auth":"noauth","udp":false}}],"outbounds":[$proxy_json,{"tag":"direct","protocol":"freedom"},{"tag":"block","protocol":"blackhole"}],"routing":{${probe_routing}}${probe_extra}}
+EOS
+  tmp_validate="$(mktemp)"
+  if ! /usr/bin/xray run -test -c "$tmp_config" >"$tmp_validate" 2>&1; then
+    probe_error="$(tail -n 1 "$tmp_validate" | tr '\r\n' '  ')"
+    rm -f "$tmp_config" "$tmp_validate"
+    fail "не удалось запустить проверочную конфигурацию Xray: ${probe_error:-неизвестная ошибка}"
+  fi
+  rm -f "$tmp_validate"
+  mv "$tmp_config" "$destination"
+  chmod 0600 "$destination"
+}
+
+cmd_prepare_probe_config() {
+  load_state
+  profile_id="${1:-}"
+  validate_profile_id "$profile_id"
+  profile_url="$(profile_url_by_id "$profile_id")"
+  probe_port="${2:-19090}"
+  validate_port "$probe_port"
+  destination="${GENERATED_DIR}/${profile_id}.probe.json"
+  write_profile_probe_config "$profile_url" "$probe_port" "$destination"
+  echo "$destination"
+}
+
+cmd_rebuild_probe_configs() {
+  load_state
+  rebuild_probe_configs
+  echo "Generated profile configs rebuilt"
+}
+
+rebuild_probe_configs() {
+  stage_dir="${GENERATED_DIR}.new.$$"
+  old_dir="${GENERATED_DIR}.old.$$"
+  rm -rf "$stage_dir" "$old_dir"
+  mkdir -p "$stage_dir"
+  while IFS='|' read -r generated_profile_id _ _ generated_url_b64 _; do
+    [ -n "$generated_profile_id" ] || continue
+    generated_url="$(b64_decode "$generated_url_b64")"
+    write_profile_probe_config "$generated_url" 19090 "${stage_dir}/${generated_profile_id}.probe.json"
+  done < "$LINKS_FILE"
+  if [ -d "$GENERATED_DIR" ]; then mv "$GENERATED_DIR" "$old_dir"; fi
+  if mv "$stage_dir" "$GENERATED_DIR"; then
+    rm -rf "$old_dir"
+  else
+    [ ! -d "$old_dir" ] || mv "$old_dir" "$GENERATED_DIR"
+    fail "failed to activate generated profile configs"
+  fi
 }
 
 cmd_ping_link() {
   load_state
   profile_id="${1:-}"
-  profile_url="$(profile_url_by_id "$profile_id")"
-  profile_host="$(url_host "$profile_url")"
-  [ -n "$profile_host" ] || fail "profile host is empty"
-  case "$profile_host" in
-    -*|*[!A-Za-z0-9_.:%-]*) fail "profile host contains unsupported characters" ;;
-  esac
-
-  ping_output=""
-  case "$profile_host" in
-    *:*)
-      command -v ping6 >/dev/null 2>&1 || fail "IPv6 ping is not available"
-      if ! ping_output="$(ping6 -c 1 -W 3 "$profile_host" 2>&1)"; then
-        fail "no ping response from $profile_host"
-      fi
-      ;;
-    *)
-      command -v ping >/dev/null 2>&1 || fail "ping is not available"
-      if ! ping_output="$(ping -c 1 -W 3 "$profile_host" 2>&1)"; then
-        fail "no ping response from $profile_host"
-      fi
-      ;;
-  esac
-
-  latency="$(printf '%s\n' "$ping_output" | sed -n 's/.*time[=<]\([0-9.][0-9.]*\)[[:space:]]*ms.*/\1/p' | head -n 1)"
-  [ -n "$latency" ] || fail "ping response did not contain latency"
-  printf '%s\n' "$latency"
+  validate_profile_id "$profile_id"
+  command -v curl >/dev/null 2>&1 && curl --version >/dev/null 2>&1 || fail "проверка подключения требует рабочий curl"
+  probe_port=19090
+  tmp_config="${GENERATED_DIR}/${profile_id}.probe.json"
+  [ -s "$tmp_config" ] || cmd_prepare_probe_config "$profile_id" "$probe_port" >/dev/null
+  tmp_log="$(mktemp)"
+  tmp_curl_error="$(mktemp)"
+  /usr/bin/xray run -c "$tmp_config" >"$tmp_log" 2>&1 &
+  probe_pid=$!
+  trap 'kill "$probe_pid" 2>/dev/null || true; rm -f "$tmp_log" "$tmp_curl_error"' EXIT INT TERM
+  sleep 1
+  if ! kill -0 "$probe_pid" 2>/dev/null; then
+    probe_error="$(tail -n 1 "$tmp_log" | tr '\r\n' '  ')"
+    wait "$probe_pid" 2>/dev/null || true
+    rm -f "$tmp_log" "$tmp_curl_error"
+    trap - EXIT INT TERM
+    fail "проверочный Xray завершился до запроса: ${probe_error:-неизвестная ошибка}"
+  fi
+  result=""
+  last_status="000"
+  for probe_url in \
+    https://connectivitycheck.gstatic.com/generate_204 \
+    https://www.google.com/generate_204 \
+    https://cp.cloudflare.com/generate_204; do
+    : > "$tmp_curl_error"
+    candidate="$(curl --socks5-hostname "127.0.0.1:${probe_port}" -o /dev/null -sS \
+      --connect-timeout 8 --max-time 15 -w '%{http_code} %{time_total}' "$probe_url" 2>"$tmp_curl_error" || true)"
+    last_status="${candidate%% *}"
+    if [ "$last_status" = "204" ]; then result="$candidate"; break; fi
+  done
+  kill "$probe_pid" 2>/dev/null || true
+  wait "$probe_pid" 2>/dev/null || true
+  curl_error="$(tail -n 1 "$tmp_curl_error" | tr '\r\n' '  ')"
+  xray_error="$(tail -n 1 "$tmp_log" | tr '\r\n' '  ')"
+  rm -f "$tmp_log" "$tmp_curl_error"
+  trap - EXIT INT TERM
+  status="${result%% *}"
+  seconds="${result#* }"
+  [ "$status" = "204" ] || fail "generate_204 не прошёл (HTTP ${last_status:-000}): ${curl_error:-$xray_error}"
+  awk -v seconds="$seconds" 'BEGIN { printf "%.0f\n", seconds * 1000 }'
 }
 
 normalize_mac() {
@@ -1474,7 +1709,13 @@ build_proxy_outbound_json() {
     vless://*) build_vless_outbound_json "$1" ;;
     hysteria2://*|hy2://*) build_hysteria2_outbound_json "$1" ;;
     socks://*|socks5://*) build_socks_outbound_json "$1" ;;
-    *) fail "unsupported connection URL. Use vless://, hysteria2://, hy2://, socks:// or socks5://." ;;
+    jsoncfg://*)
+      ref="${1#jsoncfg://}"; key="${ref%%/*}"; index="${ref##*/}"
+      outbound_file="${JSON_SUBS_DIR}/${key}/outbounds-${index}"
+      [ -s "$outbound_file" ] || fail "JSON subscription outbounds are missing"
+      awk 'NF { if (seen++) printf ",\n"; print }' "$outbound_file"
+      ;;
+    *) fail "unsupported connection URL. Use vless://, hysteria2://, hy2://, socks://, socks5:// or JSON subscription." ;;
   esac
 }
 
@@ -1544,9 +1785,48 @@ write_config_files() {
   build_nft_bypass_rules
   build_routing_direct_rule_json
 
+  JSON_SUBSCRIPTION_RULES=""
+  JSON_SUBSCRIPTION_BALANCERS=""
+  DNS_ROUTE_SELECTOR='"outboundTag": "proxy"'
+  JSON_EXTRA_ROOT=""
+  case "$connection_url" in
+    jsoncfg://*)
+      ref="${connection_url#jsoncfg://}"; json_key="${ref%%/*}"; json_index="${ref##*/}"
+      rules_file="${JSON_SUBS_DIR}/${json_key}/rules-${json_index}"
+      if [ -s "$rules_file" ]; then
+        while IFS= read -r json_rule; do
+          [ -n "$json_rule" ] || continue
+          json_balancer="$(jsonfilter -s "$json_rule" -e '@.balancerTag' 2>/dev/null || true)"
+          json_outbound="$(jsonfilter -s "$json_rule" -e '@.outboundTag' 2>/dev/null || true)"
+          if [ -n "$json_balancer" ]; then
+            DNS_ROUTE_SELECTOR="\"balancerTag\": \"$(json_escape "$json_balancer")\""
+          elif [ -n "$json_outbound" ] && [ "$json_outbound" != "direct" ] && [ "$json_outbound" != "block" ]; then
+            DNS_ROUTE_SELECTOR="\"outboundTag\": \"$(json_escape "$json_outbound")\""
+          fi
+          if [ -n "$JSON_SUBSCRIPTION_RULES" ]; then JSON_SUBSCRIPTION_RULES="${JSON_SUBSCRIPTION_RULES},
+${json_rule}"; else JSON_SUBSCRIPTION_RULES="$json_rule"; fi
+        done < "$rules_file"
+      fi
+      balancers_file="${JSON_SUBS_DIR}/${json_key}/balancers-${json_index}"
+      if [ -s "$balancers_file" ]; then
+        JSON_SUBSCRIPTION_BALANCERS="$(awk 'NF { if (seen++) printf ",\n"; print }' "$balancers_file")"
+      fi
+      observatory_file="${JSON_SUBS_DIR}/${json_key}/observatory-${json_index}"
+      burst_observatory_file="${JSON_SUBS_DIR}/${json_key}/burst-observatory-${json_index}"
+      [ ! -s "$observatory_file" ] || JSON_EXTRA_ROOT="${JSON_EXTRA_ROOT},
+  \"observatory\": $(cat "$observatory_file")"
+      [ ! -s "$burst_observatory_file" ] || JSON_EXTRA_ROOT="${JSON_EXTRA_ROOT},
+  \"burstObservatory\": $(cat "$burst_observatory_file")"
+      ;;
+  esac
+
   LOCAL_SOCKS_LISTEN_ESC="$(json_escape "$LOCAL_SOCKS_LISTEN")"
   DNS_INBOUND_JSON=""
   ROUTING_RULES_OUTPUT="$ROUTING_DIRECT_RULE_JSON"
+  if [ -n "$JSON_SUBSCRIPTION_RULES" ]; then
+    if [ -n "$ROUTING_RULES_OUTPUT" ]; then ROUTING_RULES_OUTPUT="${JSON_SUBSCRIPTION_RULES},
+${ROUTING_RULES_OUTPUT}"; else ROUTING_RULES_OUTPUT="$JSON_SUBSCRIPTION_RULES"; fi
+  fi
   if [ "${DNS_PROXY_ENABLED:-0}" = "1" ]; then
     DNS_UPSTREAM_ESC="$(json_escape "$(dns_router_upstream)")"
     DNS_INBOUND_JSON=",
@@ -1563,7 +1843,7 @@ write_config_files() {
     }"
     DNS_ROUTING_RULE_JSON="      {
         \"inboundTag\": [\"dns-proxy\"],
-        \"outboundTag\": \"proxy\",
+        ${DNS_ROUTE_SELECTOR},
         \"type\": \"field\"
       }"
     if [ -n "$ROUTING_RULES_OUTPUT" ]; then
@@ -1624,10 +1904,13 @@ ${PROXY_OUTBOUND_JSON},
   ],
   "routing": {
     "domainStrategy": "IpIfNonMatch",
+    "balancers": [
+${JSON_SUBSCRIPTION_BALANCERS}
+    ],
     "rules": [
 ${ROUTING_RULES_OUTPUT}
     ]
-  }
+  }${JSON_EXTRA_ROOT}
 }
 EOS
 
@@ -1834,9 +2117,17 @@ dns_router_upstream() {
 
 dns_switch_to_proxy() {
   dns_backup_dhcp
+  fallback_servers="$(for resolv_file in /tmp/resolv.conf.d/resolv.conf.auto /tmp/resolv.conf.auto /etc/resolv.conf; do
+    [ -s "$resolv_file" ] || continue
+    awk '$1 == "nameserver" && $2 !~ /^127\./ && $2 != "::1" { print $2 }' "$resolv_file"
+  done | awk '!seen[$0]++')"
   uci set 'dhcp.@dnsmasq[0].noresolv=1'
+  uci set 'dhcp.@dnsmasq[0].strictorder=1'
   uci -q delete 'dhcp.@dnsmasq[0].server' || true
   uci add_list "dhcp.@dnsmasq[0].server=127.0.0.1#${DEFAULT_DNS_PROXY_PORT}"
+  for fallback_server in $fallback_servers; do
+    uci add_list "dhcp.@dnsmasq[0].server=${fallback_server}"
+  done
   uci commit dhcp
   /etc/init.d/dnsmasq restart >/dev/null 2>&1
 }
@@ -2162,6 +2453,7 @@ cmd_api_state() {
     "$(json_escape "${LOCAL_SOCKS_LISTEN:-$DEFAULT_LOCAL_SOCKS_LISTEN}")" "${LOCAL_SOCKS_PORT:-$DEFAULT_LOCAL_SOCKS_PORT}"
   printf '"dns":{"proxyEnabled":%s},' \
     "$([ "${DNS_PROXY_ENABLED:-0}" = "1" ] && echo true || echo false)"
+  printf '"updates":{"subscriptionHours":%s},' "${SUBSCRIPTION_REFRESH_HOURS:-0}"
   printf '"profiles":['
   api_print_profiles
   printf '],"subscriptions":['
@@ -2302,6 +2594,8 @@ xray-manager commands:
   use-socks [host] [port]                                  set SOCKS upstream and apply
   set-local-socks [listen] [port]                          local SOCKS listener, defaults 127.0.0.1:10818
   set-dns-proxy <0|1>                                     send router DNS through the active proxy
+  set-auto-refresh <0..24>                                refresh subscriptions every N hours; 0 disables
+  self-update                                             update manager from the GitHub repository
   set-lan-iface [iface]                                    LAN interface, default br-lan
   apply
   refresh
@@ -2340,6 +2634,7 @@ case "$cmd" in
   del-link) cmd_del_link "${1:-}" ;;
   del-subscription) cmd_del_subscription "${1:-}" ;;
   ping-link) cmd_ping_link "${1:-}" ;;
+  rebuild-probe-configs) cmd_rebuild_probe_configs ;;
   check-link) build_proxy_outbound_json "${1:-}" >/dev/null && echo "OK" ;;
   import) cmd_import "${1:-}" ;;
   list-nodes) cmd_list_nodes ;;
@@ -2348,6 +2643,8 @@ case "$cmd" in
   use-socks|use-upstream-socks) cmd_use_socks "${1:-}" "${2:-}" ;;
   set-local-socks) cmd_set_local_socks "${1:-}" "${2:-}" ;;
   set-dns-proxy) cmd_set_dns_proxy "${1:-}" ;;
+  set-auto-refresh) cmd_set_auto_refresh "${1:-0}" ;;
+  self-update) cmd_self_update ;;
   set-lan-iface) cmd_set_lan_iface "${1:-}" ;;
   apply) cmd_apply ;;
   refresh) cmd_refresh ;;
@@ -2523,6 +2820,13 @@ case "$action" in
   save_dns)
     run_manager set-dns-proxy "$(form_value proxy_enabled)"
     ;;
+  save_auto_refresh)
+    run_manager set-auto-refresh "$(form_value hours)"
+    ;;
+  self_update)
+    (sleep 1; "$MANAGER" self-update >/tmp/xray-manager-self-update.log 2>&1) </dev/null >/dev/null 2>&1 &
+    send_json "202 Accepted" '{"ok":true,"message":"Обновление запущено; интерфейс перезагрузится через несколько секунд"}'
+    ;;
   *)
     send_json "400 Bad Request" '{"ok":false,"error":"unknown action"}'
     ;;
@@ -2543,7 +2847,7 @@ EOF
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>Xray Manager</title>
-  <link rel="stylesheet" href="./style.css?v=20260828-2">
+  <link rel="stylesheet" href="./style.css?v=20260917-2">
 </head>
 <body>
   <div class="shell">
@@ -2552,7 +2856,7 @@ EOF
         <div class="logo" aria-hidden="true">X</div>
         <div><strong>Xray Manager</strong><span>OpenWrt · TProxy</span></div>
       </div>
-      <div class="status-wrap"><span id="statusDot" class="dot"></span><span id="serviceText">Проверка…</span><button id="serviceButton" class="button ghost small">—</button></div>
+      <div class="status-wrap"><button id="selfUpdateButton" class="button ghost small">↻ Обновить менеджер</button><span id="statusDot" class="dot"></span><span id="serviceText">Проверка…</span><button id="serviceButton" class="button ghost small">—</button></div>
     </header>
 
     <main>
@@ -2599,8 +2903,12 @@ EOF
           <div class="settings-actions"><button class="button primary">Сохранить</button></div>
         </form>
         <div id="dnsForm" class="card dns-card">
-          <label class="toggle-row"><span class="toggle-copy"><strong>Отправлять DNS через прокси</strong><small>Используется DNS-сервер, полученный роутером. При выключении DNS работает напрямую как обычно.</small></span><span class="switch"><input name="proxy_enabled" type="checkbox"><span></span></span></label>
+          <label class="toggle-row"><span class="toggle-copy"><strong>Отправлять DNS через прокси</strong><small>Прокси используется первым; при сбое dnsmasq автоматически переходит на обычные WAN DNS.</small></span><span class="switch"><input name="proxy_enabled" type="checkbox"><span></span></span></label>
         </div>
+        <form id="autoRefreshForm" class="settings-grid card dns-card auto-refresh-form">
+          <label><span>Автообновление подписок</span><select name="hours"><option value="0">Выключено</option><option value="1">Каждый час</option><option value="3">Каждые 3 часа</option><option value="6">Каждые 6 часов</option><option value="12">Каждые 12 часов</option><option value="24">Раз в сутки</option></select><small>После обновления сохраняется выбранное подключение; если его больше нет, выбирается первое.</small></label>
+          <div class="settings-actions"><button class="button primary">Сохранить</button></div>
+        </form>
       </section>
     </main>
   </div>
@@ -2623,6 +2931,7 @@ EOF
   cat > /www/xray-manager/style.css <<'EOF'
 :root{--bg:#0a0c10;--surface:#11151b;--surface-2:#171c24;--line:#252c36;--text:#f5f7fa;--muted:#8e99a8;--accent:#79f2c0;--accent-2:#48d6a0;--danger:#ff6b76;--warning:#ffc66d;--shadow:0 18px 70px rgba(0,0,0,.35)}*{box-sizing:border-box}html{background:var(--bg)}body{margin:0;min-height:100vh;background:radial-gradient(circle at 72% -10%,rgba(121,242,192,.09),transparent 33%),var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}.shell{width:min(1120px,calc(100% - 32px));margin:auto}.topbar{height:76px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}.brand,.status-wrap,.card-title,.section-head,.section-actions,.subscription-head{display:flex;align-items:center}.brand{gap:12px}.brand strong{display:block;font-size:15px}.brand span{display:block;color:var(--muted);font-size:12px}.logo{display:grid;place-items:center;width:34px;height:34px;border:1px solid rgba(121,242,192,.4);border-radius:10px;color:var(--accent);font-weight:800;background:rgba(121,242,192,.07)}.status-wrap,.section-actions{gap:9px}.status-wrap{color:var(--muted)}.dot{width:8px;height:8px;border-radius:50%;background:#66707c}.dot.on{background:var(--accent);box-shadow:0 0 0 5px rgba(121,242,192,.09)}main{padding:42px 0 64px}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;padding:18px 0 36px}.eyebrow{text-transform:uppercase;letter-spacing:.14em;color:var(--accent);font-size:11px;font-weight:700;margin:0 0 9px}.hero h1{font-size:clamp(28px,5vw,48px);letter-spacing:-.04em;line-height:1.05;margin:0 0 9px;max-width:720px}.muted,.section-head p,.card-title p,.dialog-head p{color:var(--muted);margin:0}.tabs{display:flex;gap:24px;border-bottom:1px solid var(--line);margin-bottom:28px}.tab{appearance:none;border:0;border-bottom:2px solid transparent;background:none;color:var(--muted);padding:13px 2px;font:inherit;font-weight:600;cursor:pointer}.tab.active{color:var(--text);border-color:var(--accent)}.panel{display:none}.panel.active{display:block}.section-head{justify-content:space-between;gap:20px;margin-bottom:18px}.section-head h2,.dialog-head h2{font-size:20px;margin:0 0 2px}.button{appearance:none;border:1px solid var(--line);border-radius:10px;background:var(--surface-2);color:var(--text);padding:10px 15px;font:inherit;font-weight:650;cursor:pointer;transition:.18s ease}.button:hover{border-color:#3c4654;transform:translateY(-1px)}.button:disabled{opacity:.5;cursor:wait}.button.primary{background:var(--accent);border-color:var(--accent);color:#082117}.button.primary:hover{background:var(--accent-2)}.button.ghost{background:transparent}.button.small{padding:6px 10px;font-size:12px}.list{display:grid;gap:22px}.subscription-group{display:grid;gap:10px}.subscription-head{justify-content:space-between;gap:16px;padding:0 4px}.subscription-title{min-width:0}.subscription-title h3{margin:0;font-size:14px}.subscription-title p{margin:1px 0 0;color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:720px}.subscription-nodes{display:grid;gap:10px}.group-count{color:var(--muted);font-size:12px;margin-left:6px}.profile{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;padding:17px 18px;background:linear-gradient(110deg,var(--surface),rgba(17,21,27,.72));border:1px solid var(--line);border-radius:14px}.profile.active{border-color:rgba(121,242,192,.48);box-shadow:inset 3px 0 var(--accent)}.profile.off{opacity:.58}.profile-main{display:flex;align-items:center;gap:14px;min-width:0}.protocol-icon{display:grid;place-items:center;flex:0 0 auto;width:42px;height:42px;border-radius:12px;background:#1d252d;color:var(--accent);font-weight:800;text-transform:uppercase}.profile h3{margin:0;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.meta{display:flex;gap:8px;align-items:center;color:var(--muted);font-size:12px}.badge{padding:2px 7px;border-radius:99px;background:rgba(121,242,192,.09);color:var(--accent);font-size:10px;text-transform:uppercase;letter-spacing:.08em}.profile-actions,.rule-actions{display:flex;align-items:center;gap:8px}.icon-button{appearance:none;border:0;background:transparent;color:var(--muted);font-size:22px;line-height:1;padding:6px;cursor:pointer}.icon-button.danger:hover{color:var(--danger)}.empty{text-align:center;padding:64px 20px;border:1px dashed var(--line);border-radius:16px;color:var(--muted)}.empty h3{color:var(--text);margin:12px 0 4px}.empty p{margin:0}.empty-icon{font-size:24px;color:var(--accent)}.split{display:grid;grid-template-columns:1fr 1fr;gap:16px}.card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:20px}.card-title{justify-content:space-between;margin-bottom:16px}.card-title h3{margin:0;font-size:16px}.counter{display:grid;place-items:center;min-width:28px;height:28px;padding:0 8px;border-radius:99px;background:var(--surface-2);color:var(--muted)}.inline-form{display:flex;gap:8px;margin-bottom:15px}input,textarea,select{width:100%;border:1px solid var(--line);border-radius:10px;background:#0c1015;color:var(--text);padding:10px 12px;font:inherit;outline:0}input:focus,textarea:focus,select:focus{border-color:rgba(121,242,192,.65);box-shadow:0 0 0 3px rgba(121,242,192,.07)}input:disabled{opacity:.48}.rule-list{display:grid;gap:6px}.rule{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:42px;padding:7px 8px 7px 11px;border-radius:9px;background:var(--surface-2)}.rule.off .rule-value{text-decoration:line-through;color:var(--muted)}.rule-value{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}.switch{position:relative;width:36px;height:21px;flex:0 0 auto}.switch input{position:absolute;opacity:0}.switch span{position:absolute;inset:0;border-radius:99px;background:#303844;cursor:pointer}.switch span:after{content:"";position:absolute;width:15px;height:15px;left:3px;top:3px;border-radius:50%;background:#9ca5b1;transition:.18s}.switch input:checked+span{background:rgba(121,242,192,.25)}.switch input:checked+span:after{transform:translateX(15px);background:var(--accent)}.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.settings-grid label span{display:block;font-weight:650;margin-bottom:7px}.settings-grid small,.toggle-row small{display:block;color:var(--muted);margin-top:5px}.settings-actions{grid-column:1/-1;display:flex;justify-content:flex-end;gap:8px}.dns-card{margin-top:16px}.dns-title{gap:16px}.dns-toggles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:18px}.dns-card .toggle-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:16px;min-width:0;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--surface-2);cursor:pointer}.toggle-copy{display:block;min-width:0}.toggle-copy strong,.toggle-copy small{display:block}.toggle-row>.switch{display:block}.dns-fields .wide{grid-column:1/-1}.status-badge{white-space:nowrap;padding:4px 9px;border-radius:99px;background:var(--surface-2);color:var(--muted);font-size:11px}.status-badge.on{background:rgba(121,242,192,.1);color:var(--accent)}.status-badge.warn{background:rgba(255,198,109,.1);color:var(--warning)}dialog{width:min(650px,calc(100% - 28px));padding:0;border:1px solid var(--line);border-radius:18px;background:var(--surface);color:var(--text);box-shadow:var(--shadow)}dialog::backdrop{background:rgba(3,5,8,.74);backdrop-filter:blur(5px)}.dialog-card{padding:24px}.dialog-head{display:flex;justify-content:space-between;gap:18px;margin-bottom:18px}.dialog-card textarea{resize:vertical;min-height:180px}.protocols{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}.protocols span{font-size:10px;color:var(--muted);border:1px solid var(--line);border-radius:99px;padding:3px 7px}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}.toast{position:fixed;right:24px;bottom:24px;max-width:min(420px,calc(100% - 48px));padding:12px 15px;border:1px solid var(--line);border-radius:11px;background:#1a2028;box-shadow:var(--shadow);opacity:0;transform:translateY(10px);pointer-events:none;transition:.2s}.toast.show{opacity:1;transform:none}.toast.error{border-color:rgba(255,107,118,.5);color:#ffb1b7}@media(max-width:760px){.shell{width:min(100% - 22px,1120px)}.topbar{height:66px}.status-wrap>#serviceText{display:none}main{padding-top:24px}.hero{align-items:flex-start;flex-direction:column}.hero .button{width:100%}.split,.settings-grid,.dns-toggles{grid-template-columns:1fr}.profile{grid-template-columns:1fr}.profile-actions{justify-content:flex-end}.section-head{align-items:flex-start}.section-actions{flex-wrap:wrap;justify-content:flex-end}.inline-form{flex-direction:column}.tabs{gap:16px;overflow:auto}.dns-fields .wide{grid-column:auto}}
 .subscription-actions{display:flex;align-items:center;gap:8px}.button.danger{color:var(--danger)}.button.danger:hover{border-color:rgba(255,107,118,.55)}.ping-button{min-width:64px}
+.auto-refresh-form{grid-template-columns:minmax(0,530px) auto;align-items:start;justify-content:space-between}.auto-refresh-form select{appearance:none;-webkit-appearance:none;padding-right:42px;background-color:#0c1015;background-image:linear-gradient(45deg,transparent 50%,#aeb7c2 50%),linear-gradient(135deg,#aeb7c2 50%,transparent 50%);background-position:calc(100% - 18px) 50%,calc(100% - 13px) 50%;background-size:5px 5px,5px 5px;background-repeat:no-repeat}.auto-refresh-form .settings-actions{grid-column:auto;align-self:start;margin-top:28px}.auto-refresh-form .settings-actions .button{height:43px;min-height:43px}@media(max-width:760px){.auto-refresh-form{grid-template-columns:1fr}.auto-refresh-form .settings-actions{grid-column:auto;margin-top:0}.auto-refresh-form .settings-actions .button{width:100%}}
 EOF
 
   cat > /www/xray-manager/app.js <<'EOF'
@@ -2636,7 +2945,7 @@ function escapeHtml(value=''){return String(value).replace(/[&<>'"]/g,c=>({'&':'
 function formatLatency(value){const milliseconds=Number(value);return Number.isFinite(milliseconds)?String(Math.round(milliseconds)):String(value);}
 function toast(message,error=false){const el=$('#toast');el.textContent=message||'Готово';el.className='toast show'+(error?' error':'');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.className='toast',3600);}
 async function request(action,data={}){if(busy)return;busy=true;document.body.classList.add('busy');try{const body=new URLSearchParams({action,...data});const response=await fetch(api,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body});const result=await response.json();if(!result.ok)throw new Error(result.error||'Ошибка');toast(result.message);await load();return result;}catch(error){toast(error.message,true);throw error;}finally{busy=false;document.body.classList.remove('busy');}}
-async function pingProfile(id,button){if(busy)return;busy=true;document.body.classList.add('busy');const previous=button.textContent;button.disabled=true;button.textContent='…';try{const body=new URLSearchParams({action:'ping_profile',id});const response=await fetch(api,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body});const result=await response.json();if(!result.ok)throw new Error(result.error||'Нет ответа');const rawLatency=String(result.message||'').trim();if(!/^\d+(?:\.\d+)?$/.test(rawLatency))throw new Error('Некорректный ответ ping');const latency=formatLatency(rawLatency);pingResults.set(id,latency);button.textContent=`${latency} мс`;button.title='ICMP-задержка до сервера';}catch(error){pingResults.delete(id);button.textContent='Нет ответа';button.title=error.message;toast(error.message,true);}finally{busy=false;button.disabled=false;document.body.classList.remove('busy');if(button.textContent==='…')button.textContent=previous;}}
+async function pingProfile(id,button){if(busy)return;busy=true;document.body.classList.add('busy');const previous=button.textContent;button.disabled=true;button.textContent='…';try{const body=new URLSearchParams({action:'ping_profile',id});const response=await fetch(api,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body});const result=await response.json();if(!result.ok)throw new Error(result.error||'Нет ответа');const rawLatency=String(result.message||'').trim();if(!/^\d+(?:\.\d+)?$/.test(rawLatency))throw new Error('Некорректный ответ проверки');const latency=formatLatency(rawLatency);pingResults.set(id,latency);button.textContent=`${latency} мс`;button.title='HTTP generate_204 через это подключение';}catch(error){pingResults.delete(id);button.textContent='Нет ответа';button.title=error.message;toast(error.message,true);}finally{busy=false;button.disabled=false;document.body.classList.remove('busy');if(button.textContent==='…')button.textContent=previous;}}
 async function load(){try{const response=await fetch(api,{cache:'no-store'});state=await response.json();render();}catch(error){toast('Не удалось получить состояние: '+error.message,true);}}
 
 function render(){
@@ -2651,8 +2960,9 @@ function render(){
   renderRules('mac',state.bypass.macs,$('#macList'));renderRules('domain',state.bypass.domains,$('#domainList'));$('#macCount').textContent=state.bypass.macs.length;$('#domainCount').textContent=state.bypass.domains.length;
   const form=$('#settingsForm');form.lan_iface.value=state.settings.lanIface;form.tproxy_port.value=state.settings.tproxyPort;form.socks_listen.value=state.settings.localSocksListen;form.socks_port.value=state.settings.localSocksPort;
   $('#dnsForm').querySelector('[name="proxy_enabled"]').checked=state.dns.proxyEnabled;
+  $('#autoRefreshForm').hours.value=String(state.updates?.subscriptionHours||0);
 }
-function renderProfile(profile){const latency=pingResults.get(profile.id);return `<article class="profile ${profile.active?'active':''} ${profile.enabled?'':'off'}"><div class="profile-main"><div class="protocol-icon">${escapeHtml(profile.kind.slice(0,2))}</div><div style="min-width:0"><h3>${escapeHtml(profile.name)}</h3><div class="meta"><span class="badge">${escapeHtml(profile.kind)}</span><span>${escapeHtml(profile.host)}</span>${profile.active?'<span>· активно</span>':''}</div></div></div><div class="profile-actions"><button class="button ghost small ping-button" data-ping-profile="${escapeHtml(profile.id)}" title="Проверить ICMP-задержку">${latency?`${escapeHtml(latency)} мс`:'Пинг'}</button><label class="switch" title="Включить профиль"><input type="checkbox" data-profile-toggle="${escapeHtml(profile.id)}" ${profile.enabled?'checked':''}><span></span></label><button class="button small" data-select="${escapeHtml(profile.id)}" ${!profile.enabled||profile.active?'disabled':''}>Выбрать</button><button class="icon-button danger" data-delete-profile="${escapeHtml(profile.id)}" title="Удалить">×</button></div></article>`;}
+function renderProfile(profile){const latency=pingResults.get(profile.id);return `<article class="profile ${profile.active?'active':''} ${profile.enabled?'':'off'}"><div class="profile-main"><div class="protocol-icon">${escapeHtml(profile.kind.slice(0,2))}</div><div style="min-width:0"><h3>${escapeHtml(profile.name)}</h3><div class="meta"><span class="badge">${escapeHtml(profile.kind)}</span><span>${escapeHtml(profile.host)}</span>${profile.active?'<span>· активно</span>':''}</div></div></div><div class="profile-actions"><button class="button ghost small ping-button" data-ping-profile="${escapeHtml(profile.id)}" title="Проверить generate_204 через подключение">${latency?`${escapeHtml(latency)} мс`:'Проверить'}</button><label class="switch" title="Включить профиль"><input type="checkbox" data-profile-toggle="${escapeHtml(profile.id)}" ${profile.enabled?'checked':''}><span></span></label><button class="button small" data-select="${escapeHtml(profile.id)}" ${!profile.enabled||profile.active?'disabled':''}>Выбрать</button><button class="icon-button danger" data-delete-profile="${escapeHtml(profile.id)}" title="Удалить">×</button></div></article>`;}
 function renderProfileGroup(title,subtitle,profiles,source=''){return `<section class="subscription-group"><div class="subscription-head"><div class="subscription-title"><h3>${escapeHtml(title)} <span class="group-count">${profiles.length}</span></h3><p title="${escapeHtml(subtitle)}">${escapeHtml(subtitle)}</p></div>${source?`<div class="subscription-actions"><button class="button ghost small" data-refresh-subscription="${escapeHtml(source)}">↻ Обновить</button><button class="button ghost small danger" data-delete-subscription="${escapeHtml(source)}" data-subscription-count="${profiles.length}">Удалить</button></div>`:''}</div><div class="subscription-nodes">${profiles.map(renderProfile).join('')}</div></section>`;}
 function renderRules(kind,items,container){container.innerHTML=items.length?items.map(item=>`<div class="rule ${item.enabled?'':'off'}"><span class="rule-value">${escapeHtml(item.value)}</span><span class="rule-actions"><label class="switch"><input type="checkbox" data-rule-toggle="${escapeHtml(kind)}" data-value="${escapeHtml(item.value)}" ${item.enabled?'checked':''}><span></span></label><button class="icon-button danger" data-rule-delete="${escapeHtml(kind)}" data-value="${escapeHtml(item.value)}" title="Удалить">×</button></span></div>`).join(''):'<div class="muted" style="padding:10px 2px">Список пуст</div>';}
 
@@ -2669,6 +2979,8 @@ $('#bypass').addEventListener('change',event=>{const input=event.target.closest(
 $('#bypass').addEventListener('click',event=>{const button=event.target.closest('[data-rule-delete]');if(button&&confirm('Удалить правило?'))request('delete_bypass',{kind:button.dataset.ruleDelete,value:button.dataset.value});});
 $('#settingsForm').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;await request('save_settings',{lan_iface:form.lan_iface.value,socks_listen:form.socks_listen.value,socks_port:form.socks_port.value});});
 $('#dnsForm').addEventListener('change',event=>{const input=event.target.closest('[name="proxy_enabled"]');if(input)request('save_dns',{proxy_enabled:input.checked?'1':'0'}).catch(()=>load());});
+$('#autoRefreshForm').addEventListener('submit',event=>{event.preventDefault();request('save_auto_refresh',{hours:event.currentTarget.hours.value});});
+$('#selfUpdateButton').addEventListener('click',async()=>{if(!confirm('Скачать свежий install.sh из репозитория и переустановить менеджер?'))return;try{await request('self_update');setTimeout(()=>location.reload(),12000);}catch{}});
 load();
 EOF
 
@@ -2687,6 +2999,7 @@ main() {
   write_init_scripts
   write_manager
   /usr/bin/xray-manager migrate-state
+  /usr/bin/xray-manager rebuild-probe-configs
   write_web_ui
 
   /etc/init.d/xray enable
